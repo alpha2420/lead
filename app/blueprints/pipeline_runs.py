@@ -44,7 +44,7 @@ def start_run():
     profile           = str(data.get("profile", "balanced"))
     apify_actor       = data.get("apify_actor") or None
 
-    run_id = uuid.uuid4().hex[:8]
+    run_id = uuid.uuid4().hex
     registry = _registry()
     registry.create(run_id, inquiry, queue.Queue())
 
@@ -95,7 +95,7 @@ def start_custom_run():
     profile           = str(data.get("profile", "balanced"))
     apify_actor       = data.get("apify_actor") or None
 
-    run_id = uuid.uuid4().hex[:8]
+    run_id = uuid.uuid4().hex
     registry = _registry()
     registry.create(run_id, "Custom ICP Run", queue.Queue())
 
@@ -202,7 +202,7 @@ def start_imported_run():
     if not raw_leads:
         return jsonify({"error": "No leads found in file"}), 400
 
-    run_id = uuid.uuid4().hex[:8]
+    run_id = uuid.uuid4().hex
     registry = _registry()
     registry.create(run_id, inquiry, queue.Queue())
 
@@ -226,7 +226,23 @@ def stream(run_id: str):
 
     def generate():
         while True:
-            msg = q.get()
+            try:
+                msg = q.get(timeout=25)
+            except queue.Empty:
+                # The queue is drained exactly once (one None sentinel at
+                # the end of the run). A second connection to this route
+                # for an already-finished run — a browser reconnect, a
+                # refresh, a duplicate tab — used to find an empty queue
+                # and block here forever, permanently parking the request
+                # thread. If the run has already finished, stop waiting;
+                # otherwise this is a legitimate long-running stage, so
+                # send an SSE comment to keep the connection alive and
+                # keep waiting.
+                run = registry.get(run_id)
+                if run is None or run["status"] in ("complete", "error"):
+                    break
+                yield ": keep-alive\n\n"
+                continue
             if msg is None:
                 break
             yield f"data: {json.dumps(msg)}\n\n"

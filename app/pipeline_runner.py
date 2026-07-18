@@ -7,7 +7,7 @@ import queue
 
 import pipeline as pl
 
-from .logging_utils import RunQueueHandler
+from .logging_utils import RunIdFilter, RunQueueHandler
 from .state import RunRegistry, save_run_metadata
 
 logger = logging.getLogger(__name__)
@@ -21,9 +21,15 @@ def run_pipeline_thread(run_registry: RunRegistry, run_id: str, inquiry: str, ta
     run = run_registry.get(run_id)
     q: queue.Queue = run["queue"]
 
-    # Attach our custom handler to the pipeline module's logger
+    # Tag this thread as the active run (see pipeline.current_run_id) and
+    # attach our custom handler to the pipeline module's logger, filtered to
+    # only this run's records — without the filter, concurrent runs' SSE
+    # streams would leak each other's log lines through the one shared
+    # `pl.log` logger.
+    pl.set_current_run_id(run_id)
     handler = RunQueueHandler(q)
     handler.setFormatter(logging.Formatter("%(message)s"))
+    handler.addFilter(RunIdFilter(run_id))
     pl.log.addHandler(handler)
 
     def push_stage(stage: int, label: str):
@@ -242,6 +248,7 @@ def run_pipeline_thread(run_registry: RunRegistry, run_id: str, inquiry: str, ta
 
     finally:
         pl.log.removeHandler(handler)
+        pl.set_current_run_id(None)
         q.put(None)   # sentinel — tells the SSE generator to stop
 
 
@@ -249,9 +256,15 @@ def run_pipeline_imported_thread(run_registry: RunRegistry, run_id: str, inquiry
     run = run_registry.get(run_id)
     q: queue.Queue = run["queue"]
 
-    # Attach our custom handler to the pipeline module's logger
+    # Tag this thread as the active run (see pipeline.current_run_id) and
+    # attach our custom handler to the pipeline module's logger, filtered to
+    # only this run's records — without the filter, concurrent runs' SSE
+    # streams would leak each other's log lines through the one shared
+    # `pl.log` logger.
+    pl.set_current_run_id(run_id)
     handler = RunQueueHandler(q)
     handler.setFormatter(logging.Formatter("%(message)s"))
+    handler.addFilter(RunIdFilter(run_id))
     pl.log.addHandler(handler)
 
     def push_stage(stage: int, label: str):
@@ -404,4 +417,5 @@ def run_pipeline_imported_thread(run_registry: RunRegistry, run_id: str, inquiry
 
     finally:
         pl.log.removeHandler(handler)
+        pl.set_current_run_id(None)
         q.put(None)   # sentinel — tells the SSE generator to stop

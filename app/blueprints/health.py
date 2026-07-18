@@ -3,6 +3,7 @@ the active email verifier, returning live status/latency for the dashboard's
 API Status indicator."""
 
 import os
+import re
 import time
 
 import google.genai as genai
@@ -16,6 +17,18 @@ APOLLO_API_KEY     = os.getenv("APOLLO_API_KEY")
 APIFY_API_TOKEN    = os.getenv("APIFY_API_TOKEN")
 ZEROBOUNCE_API_KEY = os.getenv("ZEROBOUNCE_API_KEY")
 APIFY_ACTOR_ID     = os.getenv("APIFY_ACTOR_ID", "")
+
+# Apify/ZeroBounce pass their key as a URL query param; `requests`
+# connection/timeout exceptions commonly stringify the full request URL
+# (e.g. "Max retries exceeded with url: /v2/users/me?token=..."), so a
+# transient network failure here used to echo the live key straight back
+# in this route's JSON response. Strip any api_key/token/key query value
+# out of an exception message before it's ever returned to a client.
+_SECRET_QUERY_RE = re.compile(r'([?&](?:api_key|apikey|token|key)=)[^&\s]+', re.IGNORECASE)
+
+
+def _safe_error(e: Exception) -> str:
+    return _SECRET_QUERY_RE.sub(r'\1***', str(e))[:120]
 
 
 @bp.route("/health")
@@ -40,7 +53,7 @@ def api_health():
                 "latency_ms": round((time.time() - t0) * 1000),
             }
         except Exception as e:
-            results["gemini"] = {"status": "error", "message": str(e)[:120], "latency_ms": round((time.time() - t0) * 1000)}
+            results["gemini"] = {"status": "error", "message": _safe_error(e), "latency_ms": round((time.time() - t0) * 1000)}
 
     # ── Apollo ────────────────────────────────────────────────────────────────
     if not APOLLO_API_KEY:
@@ -70,7 +83,7 @@ def api_health():
             else:
                 results["apollo"] = {"status": "error", "message": f"HTTP {resp.status_code}", "latency_ms": latency}
         except Exception as e:
-            results["apollo"] = {"status": "error", "message": str(e)[:120], "latency_ms": round((time.time() - t0) * 1000)}
+            results["apollo"] = {"status": "error", "message": _safe_error(e), "latency_ms": round((time.time() - t0) * 1000)}
 
     # ── Apify ─────────────────────────────────────────────────────────────────
     if not APIFY_API_TOKEN:
@@ -98,7 +111,7 @@ def api_health():
             else:
                 results["apify"] = {"status": "error", "message": f"HTTP {resp.status_code}", "latency_ms": latency}
         except Exception as e:
-            results["apify"] = {"status": "error", "message": str(e)[:120], "latency_ms": round((time.time() - t0) * 1000)}
+            results["apify"] = {"status": "error", "message": _safe_error(e), "latency_ms": round((time.time() - t0) * 1000)}
 
     # ── Explorium ─────────────────────────────────────────────────────────────
     explorium_key = os.getenv("EXPLORIUM_API_KEY")
@@ -121,7 +134,7 @@ def api_health():
             else:
                 results["explorium"] = {"status": "error", "message": f"HTTP {resp.status_code}", "latency_ms": latency}
         except Exception as e:
-            results["explorium"] = {"status": "error", "message": str(e)[:120], "latency_ms": round((time.time() - t0) * 1000)}
+            results["explorium"] = {"status": "error", "message": _safe_error(e), "latency_ms": round((time.time() - t0) * 1000)}
 
     # ── Email Verifier (ZeroBounce or Custom) ──────────────────────────────────
     provider = os.getenv("EMAIL_VERIFIER_PROVIDER", "custom").lower().strip()
@@ -157,6 +170,6 @@ def api_health():
                 else:
                     results["zerobounce"] = {"status": "error", "message": f"HTTP {resp.status_code}", "latency_ms": latency, "name": "ZeroBounce"}
             except Exception as e:
-                results["zerobounce"] = {"status": "error", "message": str(e)[:120], "latency_ms": round((time.time() - t0) * 1000), "name": "ZeroBounce"}
+                results["zerobounce"] = {"status": "error", "message": _safe_error(e), "latency_ms": round((time.time() - t0) * 1000), "name": "ZeroBounce"}
 
     return jsonify(results)

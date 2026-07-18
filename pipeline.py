@@ -29,6 +29,7 @@ import difflib
 import urllib.parse
 import dns.resolver
 import requests
+import contextvars
 from datetime import datetime, timedelta
 from typing import Optional
 from dotenv import load_dotenv
@@ -46,6 +47,37 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger(__name__)
+
+# Tags the calling thread's pipeline activity with the run id driving it.
+# Each pipeline run executes in its own dedicated background thread (see
+# app/pipeline_runner.py), so a plain ContextVar set once at the top of that
+# thread stays correctly isolated per run for its whole lifetime. Two
+# consumers: (1) RunIdFilter (app/logging_utils.py) uses it to keep two
+# concurrent runs' SSE log streams from leaking into each other — previously
+# every run's RunQueueHandler was attached to this same module-level `log`,
+# so a record from run A was broadcast to run B's handler too; (2) debug
+# dump filenames below use it so concurrent runs don't race on the same file.
+current_run_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("current_run_id", default=None)
+
+
+def set_current_run_id(run_id: Optional[str]) -> None:
+    current_run_id.set(run_id)
+
+
+def get_current_run_id() -> Optional[str]:
+    return current_run_id.get()
+
+
+def _debug_dump_path(basename: str) -> str:
+    """Per-run debug dump path (e.g. apollo_raw.json) so concurrent runs
+    don't race on/overwrite each other's raw-response dumps — these can
+    contain PII, so cross-run leakage here was a real bug, not just noise."""
+    run_id = get_current_run_id()
+    if run_id:
+        stem, ext = os.path.splitext(basename)
+        return f"./output/{stem}_{run_id}{ext}"
+    return f"./output/{basename}"
+
 
 # API keys loaded from .env
 GEMINI_API_KEY     = os.getenv("GEMINI_API_KEY")
@@ -587,10 +619,12 @@ def _get_cached_apollo_enrichment(person_id: str) -> Optional[dict]:
     the same person within 30 days reuses the cached result."""
     try:
         conn = _apollo_enrich_cache_conn()
-        row = conn.execute(
-            "SELECT response_json, fetched_at FROM people WHERE person_id = ?", (person_id,)
-        ).fetchone()
-        conn.close()
+        try:
+            row = conn.execute(
+                "SELECT response_json, fetched_at FROM people WHERE person_id = ?", (person_id,)
+            ).fetchone()
+        finally:
+            conn.close()
         if not row:
             return None
         response_json, fetched_at = row
@@ -606,12 +640,14 @@ def _get_cached_apollo_enrichment(person_id: str) -> Optional[dict]:
 def _cache_apollo_enrichment(person_id: str, data: dict) -> None:
     try:
         conn = _apollo_enrich_cache_conn()
-        conn.execute(
-            "INSERT OR REPLACE INTO people (person_id, response_json, fetched_at) VALUES (?, ?, ?)",
-            (person_id, json.dumps(data), datetime.now().isoformat()),
-        )
-        conn.commit()
-        conn.close()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO people (person_id, response_json, fetched_at) VALUES (?, ?, ?)",
+                (person_id, json.dumps(data), datetime.now().isoformat()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
     except Exception as e:
         log.warning("Apollo enrichment cache write failed for %s: %s", person_id, e)
 
@@ -794,20 +830,20 @@ def scrape_apollo(
     try:
         resp = requests.post(url, json=payload, headers=headers, timeout=30)
         os.makedirs("./output", exist_ok=True)
-        with open("./output/apollo_raw.json", "w", encoding="utf-8") as f:
+        with open(_debug_dump_path("apollo_raw.json"), "w", encoding="utf-8") as f:
             f.write(resp.text)
         resp.raise_for_status()
         data = resp.json()
     except requests.exceptions.HTTPError as e:
         log.error("Apollo HTTP error %s: %s", resp.status_code, resp.text)
         os.makedirs("./output", exist_ok=True)
-        with open("./output/apollo_raw.json", "w", encoding="utf-8") as f:
+        with open(_debug_dump_path("apollo_raw.json"), "w", encoding="utf-8") as f:
             f.write(json.dumps({"error": resp.text, "status_code": resp.status_code}))
         return []
     except requests.exceptions.RequestException as e:
         log.error("Apollo request failed: %s", e)
         os.makedirs("./output", exist_ok=True)
-        with open("./output/apollo_raw.json", "w", encoding="utf-8") as f:
+        with open(_debug_dump_path("apollo_raw.json"), "w", encoding="utf-8") as f:
             f.write(json.dumps({"error": str(e)}))
         return []
 
@@ -1183,14 +1219,31 @@ def _bi_negative_keywords(icp: dict) -> list[str]:
     return _dedupe_list(flat)
 
 
+def _to_number(v):
+    """Best-effort coercion of a Gemini-derived numeric field (which the
+    prompt asks for as a plain number, but isn't schema-enforced, so it
+    can arrive as a string like "50" or "$50M") into a float, or None if
+    it can't be parsed. Every downstream consumer of company size/revenue
+    routes through _bi_size_range/_bi_revenue_range below, so coercing
+    once here — instead of at each of the ~6 call sites that used to do
+    raw int()/float() on these values — closes the whole bug class at
+    the source."""
+    if v is None:
+        return None
+    try:
+        return float(str(v).replace(",", "").replace("$", ""))
+    except (TypeError, ValueError):
+        return None
+
+
 def _bi_size_range(icp: dict) -> tuple:
     company = _bi_company(icp)
-    return company.get("company_size_min"), company.get("company_size_max")
+    return _to_number(company.get("company_size_min")), _to_number(company.get("company_size_max"))
 
 
 def _bi_revenue_range(icp: dict) -> tuple:
     company = _bi_company(icp)
-    return company.get("revenue_min"), company.get("revenue_max")
+    return _to_number(company.get("revenue_min")), _to_number(company.get("revenue_max"))
 
 
 def _bi_company_stage(icp: dict) -> list[str]:
@@ -1237,14 +1290,6 @@ def _revenue_range_keywords(revenue_min, revenue_max) -> list[str]:
     industry/technographics do. No provider API can hard-filter on revenue,
     and no scraped lead carries a literal revenue figure, so this is a
     best-effort soft signal, not a precise filter."""
-    def _to_number(v):
-        if v is None:
-            return None
-        try:
-            return float(str(v).replace(",", "").replace("$", ""))
-        except (TypeError, ValueError):
-            return None
-
     lo = _to_number(revenue_min)
     hi = _to_number(revenue_max)
     if lo is None and hi is None:
@@ -1479,12 +1524,12 @@ def scrape_apify(
         resp.raise_for_status()
         items = resp.json()
         os.makedirs("./output", exist_ok=True)
-        with open("./output/apify_raw.json", "w", encoding="utf-8") as f:
+        with open(_debug_dump_path("apify_raw.json"), "w", encoding="utf-8") as f:
             json.dump(items, f, indent=2)
     except requests.exceptions.RequestException as e:
         log.error("Apify dataset fetch failed: %s", e)
         os.makedirs("./output", exist_ok=True)
-        with open("./output/apify_raw.json", "w", encoding="utf-8") as f:
+        with open(_debug_dump_path("apify_raw.json"), "w", encoding="utf-8") as f:
             json.dump({"error": str(e)}, f, indent=2)
         return []
 
@@ -2510,7 +2555,15 @@ def run_lead_sources(
         per_page_target = math.ceil(target / max(max_pages, 1))
         per_page_quota = max(per_page_target * _RAW_LEADS_PER_VERIFIED_LEAD, _MIN_RAW_QUOTA_FLOOR)
         for source in active:
-            batch = _call_source(source, icp, page, prof, explorium_api_key, apify_actor_override, validated_companies)
+            try:
+                batch = _call_source(source, icp, page, prof, explorium_api_key, apify_actor_override, validated_companies)
+            except Exception as e:
+                # One source's malformed ICP field (e.g. a non-numeric
+                # company_size/revenue value that slipped past coercion)
+                # must not kill the whole run — skip this source for this
+                # page and let the remaining sources/pages still contribute.
+                log.error("Source Orchestrator — %s raised during sequential execution: %s", source, e)
+                batch = []
             counts[source] = len(batch)
             all_leads.extend(batch)
             if len(all_leads) >= per_page_quota:
@@ -2590,10 +2643,12 @@ def _company_discovery_cache_conn() -> sqlite3.Connection:
 def _get_cached_company_discovery(cache_key: str) -> Optional[dict]:
     try:
         conn = _company_discovery_cache_conn()
-        row = conn.execute(
-            "SELECT response_json, fetched_at FROM discoveries WHERE cache_key = ?", (cache_key,)
-        ).fetchone()
-        conn.close()
+        try:
+            row = conn.execute(
+                "SELECT response_json, fetched_at FROM discoveries WHERE cache_key = ?", (cache_key,)
+            ).fetchone()
+        finally:
+            conn.close()
         if not row:
             return None
         response_json, fetched_at = row
@@ -2609,12 +2664,14 @@ def _get_cached_company_discovery(cache_key: str) -> Optional[dict]:
 def _cache_company_discovery(cache_key: str, result: dict) -> None:
     try:
         conn = _company_discovery_cache_conn()
-        conn.execute(
-            "INSERT OR REPLACE INTO discoveries (cache_key, response_json, fetched_at) VALUES (?, ?, ?)",
-            (cache_key, json.dumps(result), datetime.now().isoformat()),
-        )
-        conn.commit()
-        conn.close()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO discoveries (cache_key, response_json, fetched_at) VALUES (?, ?, ?)",
+                (cache_key, json.dumps(result), datetime.now().isoformat()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
     except Exception as e:
         log.warning("Company discovery cache write failed for %s: %s", cache_key, e)
 
@@ -2631,10 +2688,12 @@ def _company_validation_cache_conn() -> sqlite3.Connection:
 def _get_cached_company_validation(cache_key: str) -> Optional[dict]:
     try:
         conn = _company_validation_cache_conn()
-        row = conn.execute(
-            "SELECT response_json, fetched_at FROM validations WHERE cache_key = ?", (cache_key,)
-        ).fetchone()
-        conn.close()
+        try:
+            row = conn.execute(
+                "SELECT response_json, fetched_at FROM validations WHERE cache_key = ?", (cache_key,)
+            ).fetchone()
+        finally:
+            conn.close()
         if not row:
             return None
         response_json, fetched_at = row
@@ -2650,12 +2709,14 @@ def _get_cached_company_validation(cache_key: str) -> Optional[dict]:
 def _cache_company_validation(cache_key: str, verdict: dict) -> None:
     try:
         conn = _company_validation_cache_conn()
-        conn.execute(
-            "INSERT OR REPLACE INTO validations (cache_key, response_json, fetched_at) VALUES (?, ?, ?)",
-            (cache_key, json.dumps(verdict), datetime.now().isoformat()),
-        )
-        conn.commit()
-        conn.close()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO validations (cache_key, response_json, fetched_at) VALUES (?, ?, ?)",
+                (cache_key, json.dumps(verdict), datetime.now().isoformat()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
     except Exception as e:
         log.warning("Company validation cache write failed for %s: %s", cache_key, e)
 
@@ -2934,6 +2995,18 @@ def _discover_companies_via_web_search(icp: dict) -> list[dict]:
         log.error("Apify company-discovery dataset fetch failed: %s", e)
         return []
 
+    if len(items) != len(queries_list):
+        # zip() below pairs queries<->result pages purely by position — the
+        # actor doesn't echo back which query produced which page, so a
+        # dropped/reordered page silently mismatches every query after it.
+        # Can't safely re-correlate without a shared key, so at minimum make
+        # the mismatch loud instead of silent.
+        log.warning(
+            "Apify company-discovery: submitted %d queries but got %d result pages back — "
+            "results past the shorter length will be dropped, remaining pairs may be misaligned.",
+            len(queries_list), len(items),
+        )
+
     results_by_query: dict = {}
     for query, page in zip(queries_list, items):
         organic_results = page.get("organicResults", []) if isinstance(page, dict) else (page if isinstance(page, list) else [])
@@ -3107,6 +3180,13 @@ def _run_apify_company_validation_search(companies: list[str], criteria: dict) -
     except requests.exceptions.RequestException as e:
         log.error("Apify company-validation dataset fetch failed: %s", e)
         return {}
+
+    if len(items) != len(companies):
+        log.warning(
+            "Apify company-validation: submitted %d company queries but got %d result pages back — "
+            "results past the shorter length will be dropped, remaining pairs may be misaligned.",
+            len(companies), len(items),
+        )
 
     results: dict = {}
     for company, page in zip(companies, items):
@@ -3552,10 +3632,12 @@ def _coverage_cache_conn() -> sqlite3.Connection:
 def _get_cached_coverage_estimate(cache_key: str) -> Optional[dict]:
     try:
         conn = _coverage_cache_conn()
-        row = conn.execute(
-            "SELECT response_json, fetched_at FROM estimates WHERE cache_key = ?", (cache_key,)
-        ).fetchone()
-        conn.close()
+        try:
+            row = conn.execute(
+                "SELECT response_json, fetched_at FROM estimates WHERE cache_key = ?", (cache_key,)
+            ).fetchone()
+        finally:
+            conn.close()
         if not row:
             return None
         response_json, fetched_at = row
@@ -3571,12 +3653,14 @@ def _get_cached_coverage_estimate(cache_key: str) -> Optional[dict]:
 def _cache_coverage_estimate(cache_key: str, data: dict) -> None:
     try:
         conn = _coverage_cache_conn()
-        conn.execute(
-            "INSERT OR REPLACE INTO estimates (cache_key, response_json, fetched_at) VALUES (?, ?, ?)",
-            (cache_key, json.dumps(data), datetime.now().isoformat()),
-        )
-        conn.commit()
-        conn.close()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO estimates (cache_key, response_json, fetched_at) VALUES (?, ?, ?)",
+                (cache_key, json.dumps(data), datetime.now().isoformat()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
     except Exception as e:
         log.warning("Coverage estimate cache write failed: %s", e)
 
@@ -3709,10 +3793,12 @@ def _get_cached_linkedin_profile(linkedin_url: str) -> Optional[dict]:
     person within 30 days reuses the cached result instead of paying again."""
     try:
         conn = _linkedin_cache_conn()
-        row = conn.execute(
-            "SELECT response_json, fetched_at FROM profiles WHERE url = ?", (linkedin_url,)
-        ).fetchone()
-        conn.close()
+        try:
+            row = conn.execute(
+                "SELECT response_json, fetched_at FROM profiles WHERE url = ?", (linkedin_url,)
+            ).fetchone()
+        finally:
+            conn.close()
         if not row:
             return None
         response_json, fetched_at = row
@@ -3728,12 +3814,14 @@ def _get_cached_linkedin_profile(linkedin_url: str) -> Optional[dict]:
 def _cache_linkedin_profile(linkedin_url: str, profile: dict) -> None:
     try:
         conn = _linkedin_cache_conn()
-        conn.execute(
-            "INSERT OR REPLACE INTO profiles (url, response_json, fetched_at) VALUES (?, ?, ?)",
-            (linkedin_url, json.dumps(profile), datetime.now().isoformat()),
-        )
-        conn.commit()
-        conn.close()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO profiles (url, response_json, fetched_at) VALUES (?, ?, ?)",
+                (linkedin_url, json.dumps(profile), datetime.now().isoformat()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
     except Exception as e:
         log.warning("LinkedIn cache write failed for %s: %s", linkedin_url, e)
 
@@ -3848,7 +3936,11 @@ def linkedin_cross_verify(lead: dict) -> dict:
         for entry in profile.get("experience") or []:
             if not isinstance(entry, dict):
                 continue
-            if _fuzzy_ratio(lead_company, entry.get("company", "")) >= 75 and entry.get("end_date", "Present") != "Present":
+            # `.get(..., "Present")` only supplies the default when the key is
+            # missing entirely — a present-but-falsy end_date (None/"", a real
+            # scraper convention for an ongoing role) used to slip through as
+            # not-equal-to-"Present" and get misread as a FORMER employer.
+            if _fuzzy_ratio(lead_company, entry.get("company", "")) >= 75 and (entry.get("end_date") or "Present") != "Present":
                 is_current_employee = False
                 signal = "FORMER"
                 break
@@ -4514,10 +4606,12 @@ def _get_cached_claim_verification(cache_key: str) -> Optional[dict]:
     claims for the same company correctly misses cache."""
     try:
         conn = _claim_cache_conn()
-        row = conn.execute(
-            "SELECT response_json, fetched_at FROM claims WHERE cache_key = ?", (cache_key,)
-        ).fetchone()
-        conn.close()
+        try:
+            row = conn.execute(
+                "SELECT response_json, fetched_at FROM claims WHERE cache_key = ?", (cache_key,)
+            ).fetchone()
+        finally:
+            conn.close()
         if not row:
             return None
         response_json, fetched_at = row
@@ -4533,12 +4627,14 @@ def _get_cached_claim_verification(cache_key: str) -> Optional[dict]:
 def _cache_claim_verification(cache_key: str, data: dict) -> None:
     try:
         conn = _claim_cache_conn()
-        conn.execute(
-            "INSERT OR REPLACE INTO claims (cache_key, response_json, fetched_at) VALUES (?, ?, ?)",
-            (cache_key, json.dumps(data), datetime.now().isoformat()),
-        )
-        conn.commit()
-        conn.close()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO claims (cache_key, response_json, fetched_at) VALUES (?, ?, ?)",
+                (cache_key, json.dumps(data), datetime.now().isoformat()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
     except Exception as e:
         log.warning("Claim verification cache write failed for %s: %s", cache_key, e)
 
@@ -4647,6 +4743,13 @@ def _run_apify_claim_search(companies: list[str], claims: dict) -> dict:
     except requests.exceptions.RequestException as e:
         log.error("Apify claim-verification dataset fetch failed: %s", e)
         return {}
+
+    if len(items) != len(companies):
+        log.warning(
+            "Apify claim-verification: submitted %d company queries but got %d result pages back — "
+            "results past the shorter length will be dropped, remaining pairs may be misaligned.",
+            len(companies), len(items),
+        )
 
     results: dict = {}
     for company, page in zip(companies, items):
@@ -4855,10 +4958,12 @@ def _get_cached_org_enrichment(domain: str) -> Optional[dict]:
     lookup for the same company within 30 days reuses the cached result."""
     try:
         conn = _org_cache_conn()
-        row = conn.execute(
-            "SELECT response_json, fetched_at FROM orgs WHERE domain = ?", (domain,)
-        ).fetchone()
-        conn.close()
+        try:
+            row = conn.execute(
+                "SELECT response_json, fetched_at FROM orgs WHERE domain = ?", (domain,)
+            ).fetchone()
+        finally:
+            conn.close()
         if not row:
             return None
         response_json, fetched_at = row
@@ -4874,12 +4979,14 @@ def _get_cached_org_enrichment(domain: str) -> Optional[dict]:
 def _cache_org_enrichment(domain: str, data: dict) -> None:
     try:
         conn = _org_cache_conn()
-        conn.execute(
-            "INSERT OR REPLACE INTO orgs (domain, response_json, fetched_at) VALUES (?, ?, ?)",
-            (domain, json.dumps(data), datetime.now().isoformat()),
-        )
-        conn.commit()
-        conn.close()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO orgs (domain, response_json, fetched_at) VALUES (?, ?, ?)",
+                (domain, json.dumps(data), datetime.now().isoformat()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
     except Exception as e:
         log.warning("Org enrichment cache write failed for %s: %s", domain, e)
 
@@ -4961,7 +5068,7 @@ def enrich_organizations_for_leads(leads: list[dict], on_progress=None, max_work
     needing: list[tuple[dict, str]] = []
     for lead in leads:
         already_has_all = all(
-            lead.get(f) for f in ("biz_category", "biz_description", "technology", "employee_count", "market_cap")
+            lead.get(f) for f in ("biz_category", "biz_description", "technology", "employee_count", "market_cap", "industry")
         )
         if already_has_all:
             continue
@@ -5494,10 +5601,12 @@ def _csv_mapper_templates_conn() -> sqlite3.Connection:
 
 def list_csv_mapping_templates() -> list[dict]:
     conn = _csv_mapper_templates_conn()
-    rows = conn.execute(
-        "SELECT name, mapping_json, settings_json, created_at, updated_at FROM templates ORDER BY updated_at DESC"
-    ).fetchall()
-    conn.close()
+    try:
+        rows = conn.execute(
+            "SELECT name, mapping_json, settings_json, created_at, updated_at FROM templates ORDER BY updated_at DESC"
+        ).fetchall()
+    finally:
+        conn.close()
     return [
         {"name": n, "mapping": json.loads(m), "settings": json.loads(s), "created_at": c, "updated_at": u}
         for n, m, s, c, u in rows
@@ -5506,23 +5615,27 @@ def list_csv_mapping_templates() -> list[dict]:
 
 def save_csv_mapping_template(name: str, mapping: dict, settings: dict) -> None:
     conn = _csv_mapper_templates_conn()
-    now = datetime.now().isoformat()
-    existing = conn.execute("SELECT created_at FROM templates WHERE name = ?", (name,)).fetchone()
-    created_at = existing[0] if existing else now
-    conn.execute(
-        "INSERT OR REPLACE INTO templates (name, mapping_json, settings_json, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (name, json.dumps(mapping), json.dumps(settings), created_at, now),
-    )
-    conn.commit()
-    conn.close()
+    try:
+        now = datetime.now().isoformat()
+        existing = conn.execute("SELECT created_at FROM templates WHERE name = ?", (name,)).fetchone()
+        created_at = existing[0] if existing else now
+        conn.execute(
+            "INSERT OR REPLACE INTO templates (name, mapping_json, settings_json, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (name, json.dumps(mapping), json.dumps(settings), created_at, now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def delete_csv_mapping_template(name: str) -> None:
     conn = _csv_mapper_templates_conn()
-    conn.execute("DELETE FROM templates WHERE name = ?", (name,))
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute("DELETE FROM templates WHERE name = ?", (name,))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def write_normalized_csv(

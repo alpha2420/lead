@@ -18,6 +18,7 @@ class RunRegistry:
         self._lock = threading.Lock()
 
     def create(self, run_id: str, inquiry: str, q) -> dict:
+        self.prune()
         run = {
             "id": run_id,
             "inquiry": inquiry,
@@ -25,6 +26,7 @@ class RunRegistry:
             "queue": q,
             "results": None,
             "error": None,
+            "created_at": time.time(),
         }
         with self._lock:
             self._runs[run_id] = run
@@ -37,6 +39,22 @@ class RunRegistry:
     def list(self) -> list[dict]:
         with self._lock:
             return list(self._runs.values())
+
+    def prune(self, max_age_hours: float = 24) -> None:
+        """Drops finished (complete/error) runs older than max_age_hours.
+        Their CSV/metadata already live on disk (save_run_metadata), so this
+        only discards the in-memory bookkeeping entry — never a run that's
+        still pending/running, regardless of age. Called opportunistically
+        on every new run, since this registry was previously never pruned
+        at all (unbounded memory growth over the server's lifetime)."""
+        cutoff = time.time() - max_age_hours * 3600
+        with self._lock:
+            stale = [
+                rid for rid, run in self._runs.items()
+                if run.get("status") in ("complete", "error") and run.get("created_at", 0) < cutoff
+            ]
+            for rid in stale:
+                del self._runs[rid]
 
     def __contains__(self, run_id: str) -> bool:
         with self._lock:
