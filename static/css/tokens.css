@@ -1,0 +1,99 @@
+    /* ════════════════════════════════════════════════════════════════════
+       LeadFlow Design System — Apollo.io-inspired
+       Light-first, flat, data-dense B2B SaaS. Dark mode via body.dark-theme.
+       ════════════════════════════════════════════════════════════════════ */
+
+    :root {
+      /* Surfaces */
+      --bg:           #F6F7FB;
+      --bg-elevated:  #FFFFFF;
+      --bg-card:      #FFFFFF;
+      --bg-sidebar:   #FFFFFF;
+      --surface:      #F1F2F6;
+      --surface-hi:   #E8EAF0;
+      --well:         #F6F7FB;
+
+      /* Lines */
+      --border:       #E4E7EC;
+      --border-hi:    #D0D5DD;
+
+      /* Ink */
+      --text:         #101828;
+      --text-muted:   #475467;
+      --text-dim:     #98A2B3;
+
+      /* Brand & semantic */
+      --blue:         #2563EB;
+      --blue-light:   #3B82F6;
+      --blue-dark:    #1D4ED8;
+      --blue-tint:    #EFF4FF;
+      --indigo:       #4F46E5;
+      --cyan:         #0891B2;
+      --green:        #059669;
+      --green-light:  #10B981;
+      --green-tint:   #ECFDF5;
+      --amber:        #B45309;
+      --amber-light:  #D97706;
+      --amber-tint:   #FFFBEB;
+      --red:          #DC2626;
+      --red-tint:     #FEF2F2;
+      --violet:       #7C3AED;
+
+      /* "Ink" — near-black primary action color (Uxerflow-style), inverts in dark mode */
+      --ink:          #18181B;
+      --ink-hover:    #27272A;
+      --ink-text:     #FFFFFF;
+
+      /* Effects */
+      --btn-primary:  var(--ink);
+      --ring:         0 0 0 3px rgba(37, 99, 235, 0.16);
+      --shadow-card:  0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.06);
+      --shadow-hover: 0 4px 10px rgba(16, 24, 40, 0.08);
+      --shadow-pop:   0 12px 32px -8px rgba(16, 24, 40, 0.22), 0 0 0 1px rgba(16, 24, 40, 0.05);
+
+      /* Geometry — soft, rounded (Uxerflow-style) */
+      --radius-xs: 6px;
+      --radius-sm: 8px;
+      --radius:    10px;
+      --radius-md: 14px;
+      --radius-lg: 18px;
+
+      /* Motion & type */
+      --transition: all 0.13s cubic-bezier(0.4, 0, 0.2, 1);
+      --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      --font-mono: 'JetBrains Mono', 'SF Mono', Menlo, monospace;
+    }
+
+    body.dark-theme {
+      --bg:           #0B0D12;
+      --bg-elevated:  #12141B;
+      --bg-card:      #14161E;
+      --bg-sidebar:   #0F1117;
+      --surface:      #1A1D26;
+      --surface-hi:   #232631;
+      --well:         rgba(0, 0, 0, 0.25);
+
+      --border:       rgba(255, 255, 255, 0.08);
+      --border-hi:    rgba(255, 255, 255, 0.14);
+
+      --text:         #ECEDF1;
+      --text-muted:   #9CA3AF;
+      --text-dim:     #6B7280;
+
+      --blue-tint:    rgba(37, 99, 235, 0.12);
+      --green-tint:   rgba(16, 185, 129, 0.1);
+      --amber-tint:   rgba(217, 119, 6, 0.1);
+      --red-tint:     rgba(220, 38, 38, 0.1);
+      --amber:        #F59E0B;
+      --amber-light:  #FBBF24;
+      --green:        #34D399;
+
+      --ink:          #F4F4F5;
+      --ink-hover:    #E4E4E7;
+      --ink-text:     #18181B;
+
+      --shadow-card:  0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px -12px rgba(0, 0, 0, 0.55);
+      --shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.45);
+      --shadow-pop:   0 20px 56px -12px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.06);
+    }
+

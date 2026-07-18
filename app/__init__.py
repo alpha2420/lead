@@ -15,7 +15,11 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # repo r
 
 
 def create_app() -> Flask:
-    app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"))
+    app = Flask(
+        __name__,
+        template_folder=os.path.join(BASE_DIR, "templates"),
+        static_folder=os.path.join(BASE_DIR, "static"),
+    )
 
     # 50 MB cap on request bodies (CSV/JSON imports, CSV Mapper uploads) —
     # previously unbounded, so a large/malicious upload could buffer
