@@ -1485,7 +1485,7 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(pl._bi_ai_suggestions(icp), [{"suggestion": "Broaden geography", "tradeoff": "Less precise"}])
 
     @patch("pipeline.generate_json_with_retry")
-    @patch("pipeline.genai.Client")
+    @patch("google.genai.Client")
     def test_parse_inquiry_wraps_raw_text_in_injection_safe_tags(self, mock_client_cls, mock_gemini):
         mock_gemini.return_value = {"icp_summary": "test"}
         with patch("pipeline.GEMINI_API_KEY", "fake_key"):
