@@ -525,10 +525,10 @@
                 <label class="field-label">Target Leads</label>
                 <input type="number" id="targetLeads" min="1" max="100" value="25" class="field-input" oninput="onTargetLeadsInput()" />
                 <div class="quick-pick-row" id="targetLeadsQuickPicks">
-                  <span class="quick-pick-btn" onclick="setTargetLeads(10)">10</span>
-                  <span class="quick-pick-btn active" onclick="setTargetLeads(25)">25</span>
-                  <span class="quick-pick-btn" onclick="setTargetLeads(50)">50</span>
-                  <span class="quick-pick-btn" onclick="setTargetLeads(100)">100</span>
+                  <button type="button" class="quick-pick-btn" onclick="setTargetLeads(10)">10</button>
+                  <button type="button" class="quick-pick-btn active" onclick="setTargetLeads(25)">25</button>
+                  <button type="button" class="quick-pick-btn" onclick="setTargetLeads(50)">50</button>
+                  <button type="button" class="quick-pick-btn" onclick="setTargetLeads(100)">100</button>
                 </div>
               </div>
               <div>
@@ -1042,9 +1042,9 @@
 
                 <div class="csvmap-template-row">
                   <select id="csvMapperTemplateSelect" class="field-input"><option value="">— Select a saved mapping template —</option></select>
-                  <span class="csvmap-btn-sm" onclick="applyCsvMapperTemplate()">Load</span>
-                  <span class="csvmap-btn-sm" onclick="saveCsvMapperTemplate()">Save As…</span>
-                  <span class="csvmap-btn-sm" onclick="deleteCsvMapperTemplate()">Delete</span>
+                  <button type="button" class="csvmap-btn-sm" onclick="applyCsvMapperTemplate()">Load</button>
+                  <button type="button" class="csvmap-btn-sm" onclick="saveCsvMapperTemplate()">Save As…</button>
+                  <button type="button" class="csvmap-btn-sm" onclick="deleteCsvMapperTemplate()">Delete</button>
                 </div>
 
                 <input type="file" id="csvMapperFile" accept=".csv" style="display:none;" onchange="updateCsvMapperFileName()" />
@@ -1172,7 +1172,7 @@
 
                   <div class="crm-toolbar-right">
                     <div class="crm-stats-indicator" id="csvMapperAllLeadsStats">Showing <span>0</span> of <span>0</span></div>
-                    <span class="csvmap-btn-sm" onclick="loadCsvMapperAllLeads()">Refresh</span>
+                    <button type="button" class="csvmap-btn-sm" onclick="loadCsvMapperAllLeads()">Refresh</button>
                     <button class="btn-export" id="btnExportCsvMapperAllLeads" onclick="exportCsvMapperAllLeads()" disabled>
                       <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 3v12"/></svg>
                       <span id="btnExportCsvMapperAllLeadsLabel">Export All</span>

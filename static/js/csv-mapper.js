@@ -349,7 +349,7 @@
         return;
       }
       if (!filtered.length) {
-        body.innerHTML = `<tr><td colspan="${headers.length + 1}" style="padding:32px; text-align:center; color:var(--text-dim); font-size:0.72rem;">No leads match these filters. <span class="csvmap-btn-sm" style="margin-left:6px;" onclick="clearCsvMapperAllLeadsFilters()">Clear filters</span></td></tr>`;
+        body.innerHTML = `<tr><td colspan="${headers.length + 1}" style="padding:32px; text-align:center; color:var(--text-dim); font-size:0.72rem;">No leads match these filters. <button type="button" class="csvmap-btn-sm" style="margin-left:6px;" onclick="clearCsvMapperAllLeadsFilters()">Clear filters</button></td></tr>`;
         return;
       }
 
