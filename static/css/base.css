@@ -39,7 +39,9 @@
       gap: 10px;
       height: 52px;
       padding: 0 16px;
-      background: var(--bg-elevated);
+      background: var(--glass-bg);
+      backdrop-filter: blur(14px) saturate(180%);
+      -webkit-backdrop-filter: blur(14px) saturate(180%);
       border-bottom: 1px solid var(--border);
     }
 
@@ -51,8 +53,9 @@
       width: 26px;
       height: 26px;
       border-radius: var(--radius-sm);
-      background: var(--blue);
+      background: var(--gradient-brand);
       color: #fff;
+      box-shadow: var(--shadow-glow);
     }
     .logo-icon svg { display: block; }
     .logo-text { font-size: 0.92rem; font-weight: 800; letter-spacing: -0.02em; color: var(--text); }
@@ -193,21 +196,26 @@
     .health-latency.slow   { color: var(--red); }
 
     /* ── Buttons ───────────────────────────────────────────────────────── */
+    /* .btn-run is the app's hero action (Run Pipeline / Send to AI / Upload
+       & Run) — the one place a rich gradient earns its keep instead of
+       competing with itself; everything else stays the restrained ink/black
+       language so the gradient still reads as "the thing to click." */
     .btn-run {
       position: relative;
       display: inline-flex; align-items: center; justify-content: center; gap: 7px;
       width: 100%; padding: 8px 14px;
-      border: 1px solid var(--ink);
+      border: 1px solid transparent;
       border-radius: var(--radius-sm);
-      background: var(--ink);
-      color: var(--ink-text);
+      background: var(--gradient-brand);
+      color: #fff;
       font-size: 0.76rem; font-weight: 600; letter-spacing: 0.01em;
       cursor: pointer;
+      box-shadow: var(--shadow-glow);
       transition: var(--transition);
     }
-    .btn-run:hover:not(:disabled) { background: var(--ink-hover); border-color: var(--ink-hover); }
+    .btn-run:hover:not(:disabled) { background: var(--gradient-brand-hover); box-shadow: 0 6px 20px -2px rgba(37, 99, 235, 0.36), 0 3px 8px -1px rgba(37, 99, 235, 0.24); }
     .btn-run:active:not(:disabled) { transform: translateY(0.5px); }
-    .btn-run:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-run:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; }
 
     .btn-run-icp {
       display: inline-flex; align-items: center; justify-content: center; gap: 7px;

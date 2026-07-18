@@ -44,22 +44,33 @@
       --ink-hover:    #27272A;
       --ink-text:     #FFFFFF;
 
-      /* Effects */
+      /* Brand gradient — blue→indigo, used sparingly on primary CTAs, the
+         active nav item, and icon badges so color reads as an intentional
+         accent rather than being everywhere at once. */
+      --gradient-brand:   linear-gradient(135deg, #2563EB 0%, #4F46E5 100%);
+      --gradient-brand-hover: linear-gradient(135deg, #1D4ED8 0%, #4338CA 100%);
+      --gradient-surface: linear-gradient(180deg, rgba(255, 255, 255, 0.6) 0%, rgba(255, 255, 255, 0) 100%);
+      --glass-bg:         rgba(255, 255, 255, 0.72);
+
+      /* Effects — layered elevation (ambient + direct-light shadows) rather
+         than a single flat drop-shadow, so cards read as physically lifted. */
       --btn-primary:  var(--ink);
       --ring:         0 0 0 3px rgba(37, 99, 235, 0.16);
-      --shadow-card:  0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.06);
-      --shadow-hover: 0 4px 10px rgba(16, 24, 40, 0.08);
-      --shadow-pop:   0 12px 32px -8px rgba(16, 24, 40, 0.22), 0 0 0 1px rgba(16, 24, 40, 0.05);
+      --shadow-xs:    0 1px 2px rgba(16, 24, 40, 0.05);
+      --shadow-card:  0 1px 2px rgba(16, 24, 40, 0.04), 0 2px 6px -2px rgba(16, 24, 40, 0.05), 0 12px 24px -12px rgba(16, 24, 40, 0.09);
+      --shadow-hover: 0 2px 4px rgba(16, 24, 40, 0.05), 0 8px 16px -4px rgba(16, 24, 40, 0.10), 0 20px 32px -16px rgba(16, 24, 40, 0.14);
+      --shadow-pop:   0 4px 8px rgba(16, 24, 40, 0.06), 0 16px 32px -8px rgba(16, 24, 40, 0.20), 0 32px 64px -24px rgba(16, 24, 40, 0.28), 0 0 0 1px rgba(16, 24, 40, 0.04);
+      --shadow-glow:  0 4px 16px -2px rgba(37, 99, 235, 0.28), 0 2px 6px -1px rgba(37, 99, 235, 0.20);
 
-      /* Geometry — soft, rounded (Uxerflow-style) */
-      --radius-xs: 6px;
-      --radius-sm: 8px;
-      --radius:    10px;
-      --radius-md: 14px;
-      --radius-lg: 18px;
+      /* Geometry — soft, rounded, slightly more generous than a flat B2B grid */
+      --radius-xs: 7px;
+      --radius-sm: 9px;
+      --radius:    11px;
+      --radius-md: 16px;
+      --radius-lg: 20px;
 
       /* Motion & type */
-      --transition: all 0.13s cubic-bezier(0.4, 0, 0.2, 1);
+      --transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
       --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
       --font-mono: 'JetBrains Mono', 'SF Mono', Menlo, monospace;
     }
@@ -92,8 +103,15 @@
       --ink-hover:    #E4E4E7;
       --ink-text:     #18181B;
 
-      --shadow-card:  0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px -12px rgba(0, 0, 0, 0.55);
-      --shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.45);
-      --shadow-pop:   0 20px 56px -12px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.06);
+      --gradient-brand:   linear-gradient(135deg, #3B82F6 0%, #6366F1 100%);
+      --gradient-brand-hover: linear-gradient(135deg, #2563EB 0%, #4F46E5 100%);
+      --gradient-surface: linear-gradient(180deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0) 100%);
+      --glass-bg:         rgba(15, 17, 23, 0.72);
+
+      --shadow-xs:    0 1px 2px rgba(0, 0, 0, 0.35);
+      --shadow-card:  0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 10px -4px rgba(0, 0, 0, 0.45), 0 16px 32px -16px rgba(0, 0, 0, 0.6);
+      --shadow-hover: 0 2px 6px rgba(0, 0, 0, 0.4), 0 10px 20px -6px rgba(0, 0, 0, 0.5), 0 24px 40px -20px rgba(0, 0, 0, 0.65);
+      --shadow-pop:   0 4px 10px rgba(0, 0, 0, 0.45), 0 20px 48px -12px rgba(0, 0, 0, 0.7), 0 40px 80px -32px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(255, 255, 255, 0.06);
+      --shadow-glow:  0 4px 20px -2px rgba(59, 130, 246, 0.35), 0 2px 8px -1px rgba(99, 102, 241, 0.3);
     }
 

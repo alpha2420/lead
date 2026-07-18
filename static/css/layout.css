@@ -432,10 +432,12 @@
       background: var(--bg-card);
       border: 1px solid var(--border);
       border-radius: var(--radius-md);
-      box-shadow: var(--shadow-card);
+      box-shadow: var(--shadow-card), inset 0 1px 0 rgba(255, 255, 255, 0.5);
       transition: var(--transition);
     }
-    .stat-tile:hover { border-color: var(--border-hi); box-shadow: var(--shadow-hover); }
+    body.dark-theme .stat-tile { box-shadow: var(--shadow-card), inset 0 1px 0 rgba(255, 255, 255, 0.04); }
+    .stat-tile:hover { border-color: var(--border-hi); box-shadow: var(--shadow-hover), inset 0 1px 0 rgba(255, 255, 255, 0.5); transform: translateY(-2px); }
+    body.dark-theme .stat-tile:hover { box-shadow: var(--shadow-hover), inset 0 1px 0 rgba(255, 255, 255, 0.04); }
     .stat-tile-label { font-size: 0.62rem; font-weight: 700; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 6px; }
     .stat-tile-value { font-size: 1.5rem; font-weight: 800; letter-spacing: -0.03em; color: var(--text); line-height: 1.1; font-variant-numeric: tabular-nums; }
     .stat-tile-sub { font-size: 0.65rem; color: var(--text-dim); margin-top: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -464,7 +466,8 @@
     }
     .tab-btn svg { opacity: 0.75; flex-shrink: 0; transition: var(--transition); }
     .tab-btn:hover { background: var(--surface); color: var(--text); }
-    .tab-btn.active { background: var(--ink); color: var(--ink-text); }
+    .tab-btn.active { background: var(--ink); color: var(--ink-text); box-shadow: 0 2px 6px -1px rgba(16, 24, 40, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.08); }
+    body.dark-theme .tab-btn.active { box-shadow: 0 2px 8px -1px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.1); }
     .tab-btn.active svg { opacity: 1; }
 
     .tabs-body { position: relative; flex: 1; min-height: 0; }

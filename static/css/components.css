@@ -179,7 +179,8 @@
     .card-action-btn:hover { color: var(--blue); }
 
     /* ── Cards (generic) & charts ──────────────────────────────────────── */
-    .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 15px; box-shadow: var(--shadow-card); }
+    .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 15px; box-shadow: var(--shadow-card), inset 0 1px 0 rgba(255, 255, 255, 0.5); }
+    body.dark-theme .card { box-shadow: var(--shadow-card), inset 0 1px 0 rgba(255, 255, 255, 0.04); }
     .card-title { display: flex; align-items: center; gap: 8px; font-size: 0.71rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 13px; }
     .card-title svg { color: var(--blue); }
 
@@ -356,15 +357,16 @@
     .btn-new-search {
       display: inline-flex; align-items: center; gap: 6px;
       padding: 7px 14px;
-      border: 1px solid var(--ink);
+      border: 1px solid transparent;
       border-radius: var(--radius-sm);
-      background: var(--ink);
-      color: var(--ink-text);
+      background: var(--gradient-brand);
+      color: #fff;
       font-size: 0.74rem; font-weight: 700;
       cursor: pointer; white-space: nowrap;
+      box-shadow: var(--shadow-glow);
       transition: var(--transition);
     }
-    .btn-new-search:hover { background: var(--ink-hover); border-color: var(--ink-hover); }
+    .btn-new-search:hover { background: var(--gradient-brand-hover); box-shadow: 0 6px 20px -2px rgba(37, 99, 235, 0.36), 0 3px 8px -1px rgba(37, 99, 235, 0.24); }
 
     /* ── Search drawer (relocated AI chat / ICP / settings / import panel) ─
        Resizable: default width is wider than before, a drag handle on the
@@ -412,19 +414,21 @@
     .promo-banner {
       flex-shrink: 0; display: flex; align-items: center; gap: 12px;
       padding: 12px 16px;
-      background: linear-gradient(135deg, var(--blue-tint), var(--bg-card));
+      background: linear-gradient(120deg, var(--blue-tint) 0%, var(--bg-card) 55%);
       border: 1px solid #BFDBFE;
       border-radius: var(--radius-md);
+      box-shadow: var(--shadow-xs), inset 0 1px 0 rgba(255, 255, 255, 0.5);
     }
-    body.dark-theme .promo-banner { border-color: rgba(37, 99, 235, 0.35); }
-    .promo-icon { display: flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: var(--radius-sm); background: var(--blue); color: #fff; flex-shrink: 0; }
+    body.dark-theme .promo-banner { border-color: rgba(37, 99, 235, 0.35); box-shadow: var(--shadow-xs), inset 0 1px 0 rgba(255, 255, 255, 0.04); }
+    .promo-icon { display: flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: var(--radius-sm); background: var(--gradient-brand); color: #fff; flex-shrink: 0; box-shadow: var(--shadow-glow); }
     .promo-text { flex: 1; font-size: 0.76rem; color: var(--text); }
     .promo-text strong { font-weight: 700; }
     .promo-banner .btn-run { width: auto; padding: 7px 14px; flex-shrink: 0; }
 
     /* ── Stat cards (icon + View Details) ─────────────────────────────────── */
     .stat-card-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
-    .stat-card-icon { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: var(--radius-sm); background: var(--surface); color: var(--text-muted); flex-shrink: 0; }
+    .stat-card-icon { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: var(--radius-sm); background: linear-gradient(135deg, var(--surface-hi), var(--surface)); color: var(--text-muted); flex-shrink: 0; box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6); }
+    body.dark-theme .stat-card-icon { box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06); }
     .stat-card-link { font-size: 0.63rem; font-weight: 600; color: var(--text-dim); display: inline-flex; align-items: center; gap: 2px; background: none; border: none; cursor: pointer; padding: 0; transition: var(--transition); }
     .stat-card-link:hover { color: var(--blue); }
 
