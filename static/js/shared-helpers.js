@@ -1,4 +1,29 @@
     // ── Helpers ────────────────────────────────────────────────────────────────
+    // These two exist because dynamic (AI-generated or user-typed) text gets
+    // embedded straight into inline onclick="..." attributes throughout the
+    // ICP tab's "Copy" buttons — a value containing a literal quote character
+    // breaks out of the JS string literal AND/OR the surrounding HTML
+    // attribute otherwise, which is a real injectable-onclick bug, not just
+    // theoretical (job titles/industries can contain apostrophes/quotes).
+    // jsStringAttr: safe inside '...' (single-quoted JS string) inside "..."
+    // (the onclick HTML attribute) — escape the JS-string layer first
+    // (backslash, single-quote), then HTML-escape the result so a literal
+    // double-quote can't end the HTML attribute early.
+    function jsStringAttr(text) {
+      return String(text ?? '')
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'")
+        .replace(/"/g, '&quot;');
+    }
+    // jsTemplateAttr: same idea for `...` (template-literal) onclick args.
+    function jsTemplateAttr(text) {
+      return String(text ?? '')
+        .replace(/\\/g, '\\\\')
+        .replace(/`/g, '\\`')
+        .replace(/\$/g, '\\$')
+        .replace(/"/g, '&quot;');
+    }
+
     function copyToClipboard(text, btnId) {
       navigator.clipboard.writeText(text).then(() => {
         const btn = document.getElementById(btnId);

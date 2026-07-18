@@ -17,6 +17,7 @@ from .config import (
     get_current_run_id,
     log,
     set_current_run_id,
+    submit_with_context,
 )
 from .gemini import (
     extract_json,

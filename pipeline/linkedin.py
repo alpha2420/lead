@@ -251,7 +251,7 @@ def linkedin_cross_verify_leads(leads: list[dict], on_progress=None, max_workers
     if to_check:
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_lead = {executor.submit(linkedin_cross_verify, lead): lead for lead in to_check}
+            future_to_lead = {pl.submit_with_context(executor, linkedin_cross_verify, lead): lead for lead in to_check}
             for future in future_to_lead:
                 lead = future_to_lead[future]
                 try:

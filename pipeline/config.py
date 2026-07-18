@@ -56,6 +56,23 @@ def get_current_run_id() -> Optional[str]:
     return current_run_id.get()
 
 
+def submit_with_context(executor, fn, *args, **kwargs):
+    """ThreadPoolExecutor.submit() wrapper that propagates the calling
+    thread's contextvars — specifically current_run_id — into the worker
+    thread. concurrent.futures does NOT do this automatically (unlike
+    asyncio, which does): a bare `executor.submit(fn, ...)` runs `fn` with
+    a fresh, empty context, so `pl.log.*()` calls made inside a worker
+    (email verification, LinkedIn cross-verify, org enrichment, and
+    per-source scraping all fan out via ThreadPoolExecutor) see
+    current_run_id as None. RunIdFilter (app/logging_utils.py) then drops
+    those records instead of routing them to the run's SSE log stream —
+    silently, no error, just missing log lines during exactly the stages
+    that take the longest. Every ThreadPoolExecutor.submit() call in this
+    package should go through this instead of calling submit() directly."""
+    ctx = contextvars.copy_context()
+    return executor.submit(ctx.run, fn, *args, **kwargs)
+
+
 def _debug_dump_path(basename: str) -> str:
     """Per-run debug dump path (e.g. apollo_raw.json) so concurrent runs
     don't race on/overwrite each other's raw-response dumps — these can

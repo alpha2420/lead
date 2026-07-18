@@ -192,8 +192,8 @@ def run_lead_sources(
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=max(len(active), 1)) as executor:
             future_to_source = {
-                executor.submit(
-                    _call_source, s, icp, page, prof, explorium_api_key, apify_actor_override, validated_companies
+                pl.submit_with_context(
+                    executor, _call_source, s, icp, page, prof, explorium_api_key, apify_actor_override, validated_companies
                 ): s for s in active
             }
             for future in future_to_source:

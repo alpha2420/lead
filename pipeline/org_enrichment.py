@@ -168,7 +168,7 @@ def enrich_organizations_for_leads(leads: list[dict], on_progress=None, max_work
     if unique_domains:
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_domain = {executor.submit(enrich_organization, d): d for d in unique_domains}
+            future_to_domain = {pl.submit_with_context(executor, enrich_organization, d): d for d in unique_domains}
             for future in future_to_domain:
                 domain = future_to_domain[future]
                 try:

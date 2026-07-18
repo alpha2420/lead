@@ -277,7 +277,7 @@ def scrape_apollo(
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=5) as executor:
             future_to_candidate = {
-                executor.submit(_enrich_apollo_person, c["id"]): c for c in to_enrich
+                pl.submit_with_context(executor, _enrich_apollo_person, c["id"]): c for c in to_enrich
             }
             for future in future_to_candidate:
                 try:

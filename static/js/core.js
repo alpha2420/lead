@@ -202,7 +202,7 @@
           const nameContainer = card.querySelector('.health-name');
           if (nameContainer) {
             const displayName = info.name || (api === 'zerobounce' ? 'Email Verifier' : api.charAt(0).toUpperCase() + api.slice(1));
-            nameContainer.innerHTML = `<div class="health-dot ${normalizedStatus}" id="hdot-${api}"></div> ${displayName}`;
+            nameContainer.innerHTML = `<div class="health-dot ${normalizedStatus}" id="hdot-${api}"></div> ${escapeHtml(displayName)}`;
           }
 
           if (info.latency_ms > 0) {

@@ -751,10 +751,10 @@
               <div class="apollo-filter-card">
                 <div class="apollo-filter-card-header">
                   <div class="apollo-filter-title">👥 # Employees</div>
-                  <button class="apollo-btn-copy" id="btn-copy-employees" onclick="copyToClipboard('${(company.company_size_min || '')}${company.company_size_min && company.company_size_max ? '-' : ''}${(company.company_size_max || '')}', 'btn-copy-employees')">Copy</button>
+                  <button class="apollo-btn-copy" id="btn-copy-employees" onclick="copyToClipboard('${jsStringAttr(`${(company.company_size_min || '')}${company.company_size_min && company.company_size_max ? '-' : ''}${(company.company_size_max || '')}`)}', 'btn-copy-employees')">Copy</button>
                 </div>
                 <div class="apollo-filter-value">
-                  <span class="tag" style="background: rgba(99, 102, 241, 0.1); border-color: rgba(99, 102, 241, 0.2); font-weight: 700; font-size: 0.8rem; color: var(--purple-light); cursor: pointer;" onclick="copySingleTag(this, '${(company.company_size_min || 0)} - ${(company.company_size_max || '∞')}')">
+                  <span class="tag" style="background: rgba(99, 102, 241, 0.1); border-color: rgba(99, 102, 241, 0.2); font-weight: 700; font-size: 0.8rem; color: var(--purple-light); cursor: pointer;" onclick="copySingleTag(this, '${jsStringAttr(`${(company.company_size_min || 0)} - ${(company.company_size_max || '∞')}`)}')">
                     ${(company.company_size_min || 0)} - ${(company.company_size_max || '∞')}
                   </span>
                   <span style="font-size: 0.7rem; color: var(--text-muted); margin-left: 6px;">employees</span>
@@ -765,7 +765,7 @@
               <div class="apollo-filter-card">
                 <div class="apollo-filter-card-header">
                   <div class="apollo-filter-title">🏷️ Industry</div>
-                  <button class="apollo-btn-copy" id="btn-copy-industry" onclick="copyToClipboard('${industryList.join(', ').replace(/'/g, "\\'")}', 'btn-copy-industry')">Copy</button>
+                  <button class="apollo-btn-copy" id="btn-copy-industry" onclick="copyToClipboard('${jsStringAttr(industryList.join(', '))}', 'btn-copy-industry')">Copy</button>
                 </div>
                 <div class="apollo-filter-value" style="display: flex; gap: 4px; flex-wrap: wrap;">
                   ${industryList.length ? industryList.map(ind => `<span class="tag" style="background: rgba(245, 158, 11, 0.08); border-color: rgba(245, 158, 11, 0.15); color: var(--amber); cursor: pointer;" onclick="copySingleTag(this, '${escapeHtml(ind).replace(/'/g, "\\'")}')">${escapeHtml(ind)}</span>`).join('') : '<span class="tag" style="background: rgba(245, 158, 11, 0.08); border-color: rgba(245, 158, 11, 0.15); color: var(--amber); cursor: pointer;" onclick="copySingleTag(this, \'Any\')">Any</span>'}
@@ -776,7 +776,7 @@
               <div class="apollo-filter-card">
                 <div class="apollo-filter-card-header">
                   <div class="apollo-filter-title">🪪 Job Titles</div>
-                  <button class="apollo-btn-copy" id="btn-copy-titles" onclick="copyToClipboard('${cleanTitles.join(', ')}', 'btn-copy-titles')">Copy</button>
+                  <button class="apollo-btn-copy" id="btn-copy-titles" onclick="copyToClipboard('${jsStringAttr(cleanTitles.join(', '))}', 'btn-copy-titles')">Copy</button>
                 </div>
                 <div class="apollo-filter-value" style="display: flex; gap: 4px; flex-wrap: wrap;">
                   ${cleanTitles.length ? cleanTitles.map(t => `<span class="tag" style="background: rgba(99, 102, 241, 0.08); border-color: rgba(99, 102, 241, 0.15); cursor: pointer;" onclick="copySingleTag(this, '${escapeHtml(t).replace(/'/g, "\\'")}')">${escapeHtml(t)}</span>`).join('') : 'None'}
@@ -787,7 +787,7 @@
               <div class="apollo-filter-card">
                 <div class="apollo-filter-card-header">
                   <div class="apollo-filter-title">🗝️ Title Variations</div>
-                  <button class="apollo-btn-copy" id="btn-copy-dmk" onclick="copyToClipboard('${(committee.title_variations || []).join(', ')}', 'btn-copy-dmk')">Copy</button>
+                  <button class="apollo-btn-copy" id="btn-copy-dmk" onclick="copyToClipboard('${jsStringAttr((committee.title_variations || []).join(', '))}', 'btn-copy-dmk')">Copy</button>
                 </div>
                 <div class="apollo-filter-value" style="display: flex; gap: 4px; flex-wrap: wrap;">
                   ${(committee.title_variations || []).length ? committee.title_variations.map(t => `<span class="tag" style="background: rgba(255,255,255,0.02); opacity: 0.85; cursor: pointer;" onclick="copySingleTag(this, '${escapeHtml(t).replace(/'/g, "\\'")}')">${escapeHtml(t)}</span>`).join('') : 'None'}
@@ -798,7 +798,7 @@
               <div class="apollo-filter-card">
                 <div class="apollo-filter-card-header">
                   <div class="apollo-filter-title">🏢 Company</div>
-                  <button class="apollo-btn-copy" id="btn-copy-company" onclick="copyToClipboard('Include: ${company.company_stage ? company.company_stage.join(', ') : ''} | Exclude: ${allExclusions.join(', ')}', 'btn-copy-company')">Copy</button>
+                  <button class="apollo-btn-copy" id="btn-copy-company" onclick="copyToClipboard('${jsStringAttr(`Include: ${company.company_stage ? company.company_stage.join(', ') : ''} | Exclude: ${allExclusions.join(', ')}`)}', 'btn-copy-company')">Copy</button>
                 </div>
                 <div class="apollo-filter-value" style="flex-direction: column; align-items: flex-start; gap: 10px; font-size: 0.72rem; width: 100%;">
                   <div style="width: 100%;">
@@ -829,7 +829,7 @@
               <div class="apollo-filter-card">
                 <div class="apollo-filter-card-header">
                   <div class="apollo-filter-title">📍 Location</div>
-                  <button class="apollo-btn-copy" id="btn-copy-location" onclick="copyToClipboard('${allLocations.join(', ')}', 'btn-copy-location')">Copy</button>
+                  <button class="apollo-btn-copy" id="btn-copy-location" onclick="copyToClipboard('${jsStringAttr(allLocations.join(', '))}', 'btn-copy-location')">Copy</button>
                 </div>
                 <div class="apollo-filter-value" style="display: flex; gap: 4px; flex-wrap: wrap;">
                   ${allLocations.length ? allLocations.map(g => `<span class="tag" style="background: rgba(16, 185, 129, 0.08); border-color: rgba(16, 185, 129, 0.15); color: var(--green-light); cursor: pointer;" onclick="copySingleTag(this, '${escapeHtml(g).replace(/'/g, "\\'")}')">${escapeHtml(g)}</span>`).join('') : '<span class="tag" style="background: rgba(16, 185, 129, 0.08); border-color: rgba(16, 185, 129, 0.15); color: var(--green-light); cursor: pointer;" onclick="copySingleTag(this, \'Global\')">Global</span>'}
@@ -840,7 +840,7 @@
               <div class="apollo-filter-card">
                 <div class="apollo-filter-card-header">
                   <div class="apollo-filter-title">⚙️ Technologies</div>
-                  <button class="apollo-btn-copy" id="btn-copy-tech" onclick="copyToClipboard('${allTechFlat.join(', ')}', 'btn-copy-tech')">Copy</button>
+                  <button class="apollo-btn-copy" id="btn-copy-tech" onclick="copyToClipboard('${jsStringAttr(allTechFlat.join(', '))}', 'btn-copy-tech')">Copy</button>
                 </div>
                 <div class="apollo-filter-value" style="display: flex; gap: 4px; flex-wrap: wrap;">
                   ${allTechFlat.length ? allTechFlat.map(t => `<span class="tag" style="background: rgba(139, 92, 246, 0.08); border-color: rgba(139, 92, 246, 0.15); color: var(--violet); cursor: pointer;" onclick="copySingleTag(this, '${escapeHtml(t).replace(/'/g, "\\'")}')">${escapeHtml(t)}</span>`).join('') : 'None'}
@@ -866,7 +866,7 @@
                         <span style="font-size: 0.72rem; font-weight: 700; color: var(--text-muted);">🪪 Job Title Filter Query</span>
                         <span style="font-size: 0.65rem; color: var(--text-dim);">Copy as OR query (e.g. "CFO" OR "VP Finance") for Title search fields</span>
                       </div>
-                      <button class="apollo-btn-copy" id="btn-copy-sub-titles" style="padding: 3px 10px; font-size: 0.68rem;" onclick="copyToClipboard(\`${cleanTitlesOR.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$/g, '\\$')}\`, 'btn-copy-sub-titles')">Copy Query</button>
+                      <button class="apollo-btn-copy" id="btn-copy-sub-titles" style="padding: 3px 10px; font-size: 0.68rem;" onclick="copyToClipboard(\`${jsTemplateAttr(cleanTitlesOR)}\`, 'btn-copy-sub-titles')">Copy Query</button>
                     </div>
                     <div class="boolean-box" style="display: flex; gap: 6px; flex-wrap: wrap; padding: 10px; max-height: none; overflow: visible; width: 100%;">
                       ${cleanTitles.map(t => `<span class="tag" style="background: rgba(99, 102, 241, 0.08); border-color: rgba(99, 102, 241, 0.15); font-weight: 500; font-size: 0.7rem; color: var(--purple-light); padding: 4px 8px; border-radius: 99px; line-height: 1.2; cursor: pointer;" onclick="copySingleTag(this, '${escapeHtml(t).replace(/'/g, "\\'")}')">${escapeHtml(t)}</span>`).join('')}
@@ -880,7 +880,7 @@
                         <span style="font-size: 0.72rem; font-weight: 700; color: var(--text-muted);">🏷️ Industry Filter Query</span>
                         <span style="font-size: 0.65rem; color: var(--text-dim);">Copy as OR query (e.g. "finance" OR "software") for Industry search fields</span>
                       </div>
-                      <button class="apollo-btn-copy" id="btn-copy-sub-industries" style="padding: 3px 10px; font-size: 0.68rem;" onclick="copyToClipboard(\`${cleanIndustriesOR.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$/g, '\\$')}\`, 'btn-copy-sub-industries')">Copy Query</button>
+                      <button class="apollo-btn-copy" id="btn-copy-sub-industries" style="padding: 3px 10px; font-size: 0.68rem;" onclick="copyToClipboard(\`${jsTemplateAttr(cleanIndustriesOR)}\`, 'btn-copy-sub-industries')">Copy Query</button>
                     </div>
                     <div class="boolean-box" style="display: flex; gap: 6px; flex-wrap: wrap; padding: 10px; max-height: none; overflow: visible; width: 100%;">
                       ${industryList.map(ind => `<span class="tag" style="background: rgba(245, 158, 11, 0.08); border-color: rgba(245, 158, 11, 0.15); font-weight: 500; font-size: 0.7rem; color: var(--amber); padding: 4px 8px; border-radius: 99px; line-height: 1.2; cursor: pointer;" onclick="copySingleTag(this, '${escapeHtml(ind).replace(/'/g, "\\'")}')">${escapeHtml(ind)}</span>`).join('')}
@@ -894,7 +894,7 @@
                         <span style="font-size: 0.72rem; font-weight: 700; color: var(--text-muted);">🔍 Keywords Filter Query</span>
                         <span style="font-size: 0.65rem; color: var(--text-dim);">Copy as OR query (e.g. "security" OR "api") for Keyword search fields</span>
                       </div>
-                      <button class="apollo-btn-copy" id="btn-copy-sub-keywords" style="padding: 3px 10px; font-size: 0.68rem;" onclick="copyToClipboard(\`${cleanKeywordsOR.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$/g, '\\$')}\`, 'btn-copy-sub-keywords')">Copy Query</button>
+                      <button class="apollo-btn-copy" id="btn-copy-sub-keywords" style="padding: 3px 10px; font-size: 0.68rem;" onclick="copyToClipboard(\`${jsTemplateAttr(cleanKeywordsOR)}\`, 'btn-copy-sub-keywords')">Copy Query</button>
                     </div>
                     <div class="boolean-box" style="display: flex; gap: 6px; flex-wrap: wrap; padding: 10px; max-height: none; overflow: visible; width: 100%;">
                       ${cleanKeywords.map(k => `<span class="tag" style="background: rgba(16, 185, 129, 0.08); border-color: rgba(16, 185, 129, 0.15); font-weight: 500; font-size: 0.7rem; color: var(--green-light); padding: 4px 8px; border-radius: 99px; line-height: 1.2; cursor: pointer;" onclick="copySingleTag(this, '${escapeHtml(k).replace(/'/g, "\\'")}')">${escapeHtml(k)}</span>`).join('')}
@@ -908,7 +908,7 @@
                         <span style="font-size: 0.72rem; font-weight: 700; color: var(--purple-light);">🔗 Full Combined Search Query</span>
                         <span style="font-size: 0.65rem; color: var(--text-dim);">Deterministically built from titles, industries & keywords — paste into the main search bar</span>
                       </div>
-                      <button class="apollo-btn-copy" id="btn-copy-boolean" style="padding: 3px 10px; font-size: 0.68rem;" onclick="copyToClipboard(\`${combinedQuery.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$/g, '\\$')}\`, 'btn-copy-boolean')">Copy Combined Query</button>
+                      <button class="apollo-btn-copy" id="btn-copy-boolean" style="padding: 3px 10px; font-size: 0.68rem;" onclick="copyToClipboard(\`${jsTemplateAttr(combinedQuery)}\`, 'btn-copy-boolean')">Copy Combined Query</button>
                     </div>
                     <div class="boolean-box" style="font-family: monospace; font-size: 0.65rem; background: rgba(0,0,0,0.25); padding: 8px; border-radius: 6px; border: 1px solid rgba(99,102,241,0.15); max-height: 100px; overflow-y: auto; overflow-x: hidden; width: 100%; white-space: pre-wrap; word-break: break-word; line-height: 1.45;">
                       ${escapeHtml(combinedQuery)}
@@ -921,7 +921,7 @@
               <div class="apollo-filter-card" style="grid-column: span 2;">
                 <div class="apollo-filter-card-header">
                   <div class="apollo-filter-title">📄 Raw ICP JSON Profile</div>
-                  <button class="apollo-btn-copy" id="btn-copy-json" onclick="copyToClipboard(\`${JSON.stringify(icp, null, 2).replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$/g, '\\$')}\`, 'btn-copy-json')">Copy JSON</button>
+                  <button class="apollo-btn-copy" id="btn-copy-json" onclick="copyToClipboard(\`${jsTemplateAttr(JSON.stringify(icp, null, 2))}\`, 'btn-copy-json')">Copy JSON</button>
                 </div>
                 <pre class="boolean-box" style="font-family: monospace; font-size: 0.65rem; background: rgba(0,0,0,0.2); padding: 8px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.05); max-height: 200px; overflow: auto; width: 100%; margin: 0; white-space: pre-wrap; word-break: break-all; color: var(--purple-light);">${escapeHtml(JSON.stringify(icp, null, 2))}</pre>
               </div>

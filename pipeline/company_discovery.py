@@ -656,7 +656,7 @@ def validate_companies(
     companies: list[dict],
     icp: dict,
     max_ai_validate: Optional[int] = None,
-    profile: str = pl._DEFAULT_PROFILE,
+    profile: Optional[str] = None,
 ) -> dict:
     """
     Stage 3 — two-tier validation. Tier A (free, every candidate): domain
@@ -672,6 +672,14 @@ def validate_companies(
 
     Returns {"validated": [...], "rejected": [...], "counts": {...}}.
     """
+    # `profile` defaults to None (resolved here, not in the signature) —
+    # `pl._DEFAULT_PROFILE` is defined in pipeline.sourcing, and a
+    # cross-module `pl.` default-argument value is evaluated once at
+    # import time, before pipeline/__init__.py has necessarily finished
+    # wiring up every submodule. It happened to work by import-order luck;
+    # this makes it order-independent instead of a landmine for the next
+    # unrelated refactor.
+    profile = profile or pl._DEFAULT_PROFILE
     if max_ai_validate is None:
         prof = pl._SOURCE_PROFILES.get(profile, pl._SOURCE_PROFILES[pl._DEFAULT_PROFILE])
         max_ai_validate = prof.get("max_ai_validate_companies", 40)
@@ -801,7 +809,7 @@ def _filter_leads_by_validated_companies(
 def discover_and_validate_companies(
     icp: dict,
     target: int = 25,
-    profile: str = pl._DEFAULT_PROFILE,
+    profile: Optional[str] = None,
     max_ai_validate_companies: Optional[int] = None,
 ) -> dict:
     """
@@ -812,6 +820,9 @@ def discover_and_validate_companies(
     — app.py reads validation["validated"] to pass into pl.run_lead_sources()
     as validated_companies for company-scoped People Discovery.
     """
+    # See the matching comment in validate_companies() above — same
+    # import-time-evaluation hazard, same fix.
+    profile = profile or pl._DEFAULT_PROFILE
     discovery = discover_companies(icp, target=target)
     validation = validate_companies(
         discovery["companies"], icp,

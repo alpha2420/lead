@@ -186,7 +186,7 @@ def verify_emails(leads: list[dict], provider: str = None, on_progress=None) -> 
         pl.log.info("Running custom DNS/SMTP verifier concurrently using ThreadPoolExecutor...")
         done = 0
         with ThreadPoolExecutor(max_workers=15) as executor:
-            future_to_email = {executor.submit(verify_email_custom, email): email for email in emails_to_verify}
+            future_to_email = {pl.submit_with_context(executor, verify_email_custom, email): email for email in emails_to_verify}
             for future in future_to_email:
                 email = future_to_email[future]
                 try:
@@ -213,7 +213,7 @@ def verify_emails(leads: list[dict], provider: str = None, on_progress=None) -> 
         from concurrent.futures import ThreadPoolExecutor
         done = 0
         with ThreadPoolExecutor(max_workers=15) as executor:
-            future_to_email = {executor.submit(verify_email_custom, email): email for email in emails_to_verify}
+            future_to_email = {pl.submit_with_context(executor, verify_email_custom, email): email for email in emails_to_verify}
             for future in future_to_email:
                 email = future_to_email[future]
                 try:
