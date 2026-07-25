@@ -1,6 +1,6 @@
     // ── Tabs Navigation Toggle ──────────────────────────────────────────────────
     const TAB_LABELS = {
-      'tab-crm': 'Leads', 'tab-icp': 'ICP', 'tab-search': 'Search Filters',
+      'tab-home': 'Home', 'tab-crm': 'Leads', 'tab-icp': 'ICP', 'tab-search': 'Search Filters',
       'tab-charts': 'Analytics', 'tab-history': 'Datasets', 'tab-log': 'Console',
       'tab-csvmap': 'CSV Mapper', 'tab-buyer': 'Buyer ICP', 'tab-allleads': 'All Leads'
     };
@@ -15,13 +15,20 @@
       const crumb = document.getElementById('breadcrumbSection');
       if (crumb && TAB_LABELS[tabId]) crumb.textContent = TAB_LABELS[tabId];
 
-      const isFullBleed = tabId === 'tab-allleads';
+      // tab-home has its own independent, all-time stat tiles inside its own
+      // tab content (querySelector('.stats-bar') below still resolves to the
+      // PERSISTENT per-run bar — it appears earlier in DOM order, outside
+      // .tabs-container — so this correctly hides only that one, not Home's).
+      const isFullBleed = tabId === 'tab-allleads' || tabId === 'tab-home';
       document.querySelector('.welcome-banner').style.display = isFullBleed ? 'none' : '';
       document.querySelector('.promo-banner').style.display = isFullBleed ? 'none' : '';
       document.querySelector('.stats-bar').style.display = isFullBleed ? 'none' : '';
 
       if (tabId === 'tab-history') {
         loadHistory();
+      }
+      if (tabId === 'tab-home') {
+        loadHomeDashboard();
       }
     }
 
@@ -362,6 +369,95 @@
       if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
         event.preventDefault();
         sendChatMessage();
+      }
+    }
+
+    function handleWebsiteIcpKey(event) {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        generateIcpFromWebsite();
+      }
+    }
+
+    async function generateIcpFromWebsite() {
+      const inputEl = document.getElementById('websiteUrl');
+      const website = inputEl.value.trim();
+      if (!website) {
+        showAlert('warning', 'Please enter a website URL first.');
+        return;
+      }
+
+      const chatLog = document.getElementById('chatLog');
+      hideAlert();
+
+      const userMsg = document.createElement('div');
+      userMsg.className = 'chat-msg chat-user';
+      userMsg.innerHTML = `<strong>You:</strong> Build an ICP from ${escapeHtml(website)}`;
+      chatLog.appendChild(userMsg);
+      chatLog.scrollTop = chatLog.scrollHeight;
+
+      const typingIndicator = document.createElement('div');
+      typingIndicator.id = 'websiteIcpTyping';
+      typingIndicator.className = 'chat-msg chat-ai chat-typing';
+      typingIndicator.innerHTML = `<em>AI Strategist is reading the website…</em>`;
+      chatLog.appendChild(typingIndicator);
+      chatLog.scrollTop = chatLog.scrollHeight;
+
+      const btn = document.getElementById('btnWebsiteICP');
+      const lbl = document.getElementById('btnWebsiteICPLabel');
+      const btnRun = document.getElementById('btnRun');
+
+      btn.disabled = true;
+      btnRun.disabled = true;
+      btn.classList.add('loading');
+      lbl.textContent = 'Analyzing…';
+
+      try {
+        const res = await fetch('/api/generate-icp-from-website', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ website: website })
+        });
+        const data = await res.json();
+
+        const typingEl = document.getElementById('websiteIcpTyping');
+        if (typingEl) typingEl.remove();
+
+        if (data.error || data.status === 'error') {
+          throw new Error(data.error || data.message || 'Failed to analyze that website');
+        }
+
+        const assistantMsg = document.createElement('div');
+        assistantMsg.className = 'chat-msg chat-ai';
+        const summary = (data.icp && data.icp.icp_summary) || 'ICP generated from the website.';
+        assistantMsg.innerHTML = `<strong>AI Strategist</strong> — Read ${escapeHtml(data.site_title || data.source_url || website)}. ${escapeHtml(summary)}`;
+        chatLog.appendChild(assistantMsg);
+        chatLog.scrollTop = chatLog.scrollHeight;
+
+        chatHistory.push({ role: 'user', content: `Build an ICP from ${website}` });
+        chatHistory.push({ role: 'assistant', content: summary });
+
+        inputEl.value = '';
+        lastParsedICP = data.icp;
+        renderICP(lastParsedICP);
+
+        showAlert('success', 'Ideal Customer Profile generated from website.');
+      } catch (err) {
+        const typingEl = document.getElementById('websiteIcpTyping');
+        if (typingEl) typingEl.remove();
+
+        const errMsg = document.createElement('div');
+        errMsg.className = 'chat-msg chat-err';
+        errMsg.innerHTML = `<strong>Error:</strong> ${escapeHtml(err.message)}`;
+        chatLog.appendChild(errMsg);
+        chatLog.scrollTop = chatLog.scrollHeight;
+
+        showAlert('error', `Failed to generate ICP: ${err.message}`);
+      } finally {
+        btn.disabled = false;
+        btnRun.disabled = false;
+        btn.classList.remove('loading');
+        lbl.textContent = 'Analyze Website';
       }
     }
 

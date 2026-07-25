@@ -1,466 +1,23 @@
 import os
-import csv
 import json
 import time
 import math
-import logging
-import hashlib
 import re
-import smtplib
-import socket
-import sqlite3
-import difflib
-import urllib.parse
-import dns.resolver
 import requests
-import contextvars
-from datetime import datetime, timedelta
 from typing import Optional
-import google.genai as genai
 import pipeline as pl
 
 
-def parse_search_results_with_gemini(organic_results: list[dict]) -> list[dict]:
-    """
-    Uses Gemini 2.5 Flash to parse raw Google organic results into structured B2B profiles,
-    extracting precise names, job titles, companies, and guessing standard corporate email domains.
-    """
-    pl.log.info("Parsing %d search results with Gemini...", len(organic_results))
-    
-    gemini_key = os.getenv("GEMINI_API_KEY")
-    if not gemini_key:
-        pl.log.warning("GEMINI_API_KEY is not set. Skipping Gemini parsing.")
-        return []
-
-    prompt = """You are an expert B2B data clean-up analyst.
-Given a list of Google Search result items (each has title, url, description), extract the person's:
-1. Full Name (clean and capitalized)
-2. Job Title (clean and professional)
-3. Company Name (the actual company they work for, e.g. "Chubb", "HTC Global Services", "Duck Creek Technologies", "Pharmacists Mutual")
-4. Company Domain (e.g. "chubb.com", "htcglobal.com", "duckcreek.com", "phmic.com" - infer or guess the most likely corporate email domain for the company)
-5. Location (e.g. "United States", "Greater Delhi Area", "London, UK", "New York, NY" - extract or infer from the description/snippet or title)
-6. LinkedIn URL
-
-If the item is not a personal LinkedIn profile, skip it.
-Extract the ACTUAL company name they currently work at, inferring it from the description/snippet or title. Avoid generic terms like "P&C Insurance" or certification names as the company.
-
-Return a JSON array containing objects with these exact keys:
-[
-  {
-    "name": "...",
-    "title": "...",
-    "company": "...",
-    "company_domain": "...",
-    "location": "...",
-    "linkedin_url": "..."
-  }
-]
-
-Input items:
-""" + json.dumps(organic_results, indent=2)
-
-    try:
-        client = genai.Client(api_key=gemini_key)
-        parsed = pl.generate_json_with_retry(prompt, client)
-        if isinstance(parsed, list):
-            return parsed
-        return []
-    except Exception as e:
-        pl.log.error("Failed to parse search results with Gemini: %s", e)
-        return []
-
-
-def scrape_apify(
-    icp: dict, max_leads: int = 50, actor_override: Optional[str] = None,
-    company_names: Optional[list[str]] = None,
-) -> list[dict]:
-    """
-    Runs an Apify actor (LinkedIn / company scraper) with the ICP criteria.
-
-    Apify docs: https://docs.apify.com/api/v2#/reference/actors/run-collection/run-actor
-    Endpoint: POST https://api.apify.com/v2/acts/{actorId}/runs
-
-    NOTE: The `run_input` dict below is a PLACEHOLDER.  Replace its keys with
-    whatever input schema your chosen Apify actor actually expects.
-    Common actors and their input schemas:
-      - apify/linkedin-profile-scraper  → { "profileUrls": [...] }
-      - bebity/linkedin-sales-navigator-scraper → { "searchUrl": "...", ... }
-    Adjust `_build_apify_input()` to match your actor's schema.
-
-    actor_override: when provided (e.g. a per-run choice from the UI), takes
-    priority over the pl.APIFY_ACTOR_ID env var — lets a caller pick a specific
-    actor for one run without changing global config.
-
-    company_names: when the People Discovery stage has already validated a
-    specific company list, scopes crawlerbros/lead-finder's search to those
-    companies (its schema already documents a companyNames field this code
-    just never populated before company-first search existed). Ignored by
-    every other actor.
-
-    Returns a list of raw lead dicts.
-    """
-    api_token = os.getenv("APIFY_API_TOKEN")
-    actor_id = actor_override or os.getenv("APIFY_ACTOR_ID", "apify/google-search-scraper")
-
-    pl.log.info("Stage 2b — Running Apify actor '%s' …", actor_id)
-
-    if not api_token:
-        pl.log.warning("APIFY_API_TOKEN not set — skipping Apify scrape.")
-        return []
-
-    if actor_id == "REPLACE_WITH_YOUR_ACTOR_ID":
-        pl.log.warning("APIFY_ACTOR_ID not configured — skipping Apify scrape.")
-        return []
-
-    is_leads_finder = actor_id == "code_crafter/leads-finder"
-    is_crawlerbros = actor_id == "crawlerbros/lead-finder"
-    is_google_maps = actor_id == "nourishing_courier/google-maps-lead-scraper"
-    if is_leads_finder:
-        run_input = _build_leads_finder_input(icp, max_leads)
-    elif is_crawlerbros:
-        run_input = _build_crawlerbros_input(icp, max_leads, company_names=company_names)
-    elif is_google_maps:
-        run_input = _build_google_maps_lead_scraper_input(icp, max_leads)
-    else:
-        run_input = _build_apify_input(icp, max_leads)
-    pl.log.info("Apify Run Input payload: %s", json.dumps(run_input))
-
-    headers = {"Content-Type": "application/json"}
-    # Apify actor slug uses ~ instead of / in the URL path
-    actor_path = actor_id.replace("/", "~")
-    run_url = (
-        f"https://api.apify.com/v2/acts/{actor_path}/runs"
-        f"?token={api_token}&waitForFinish=300"
-    )
-
-    try:
-        resp = requests.post(run_url, json=run_input, headers=headers, timeout=360)
-        resp.raise_for_status()
-        run_data = resp.json().get("data", {})
-        dataset_id = run_data.get("defaultDatasetId")
-        run_id = run_data.get("id")
-        run_status = run_data.get("status")
-    except requests.exceptions.HTTPError as e:
-        pl.log.error("Apify run error %s: %s", resp.status_code, resp.text)
-        return []
-    except requests.exceptions.RequestException as e:
-        pl.log.error("Apify request failed: %s", e)
-        return []
-
-    if not dataset_id:
-        pl.log.error("Apify run did not return a dataset ID.")
-        return []
-
-    # waitForFinish=300 can expire before a slow run genuinely finishes (a
-    # higher max_leads request can legitimately take 2-3+ minutes for some
-    # actors) — the run keeps going server-side, but its dataset may still
-    # be empty/partial at this exact moment. Silently trusting that as "the
-    # run returned 0 leads" would be misleading and hard to debug later, so
-    # poll the run's real status a bit longer rather than assuming it's done.
-    if run_status != "SUCCEEDED" and run_id:
-        pl.log.warning(
-            "Apify run %s hadn't finished after the initial wait (status=%s) — polling a bit longer …",
-            run_id, run_status,
-        )
-        poll_url = f"https://api.apify.com/v2/actor-runs/{run_id}?token={api_token}"
-        for _ in range(12):  # up to ~2 more minutes
-            time.sleep(10)
-            try:
-                poll_resp = requests.get(poll_url, timeout=30)
-                poll_resp.raise_for_status()
-                run_status = poll_resp.json().get("data", {}).get("status")
-            except requests.exceptions.RequestException as e:
-                pl.log.warning("Apify run status poll failed: %s", e)
-                break
-            if run_status in ("SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"):
-                break
-        pl.log.info("Apify run %s finished polling with status=%s", run_id, run_status)
-
-    # Fetch results from the dataset
-    dataset_url = (
-        f"https://api.apify.com/v2/datasets/{dataset_id}/items"
-        f"?token={api_token}&format=json"
-    )
-    try:
-        resp = requests.get(dataset_url, timeout=60)
-        resp.raise_for_status()
-        items = resp.json()
-        os.makedirs("./output", exist_ok=True)
-        with open(pl._debug_dump_path("apify_raw.json"), "w", encoding="utf-8") as f:
-            json.dump(items, f, indent=2)
-    except requests.exceptions.RequestException as e:
-        pl.log.error("Apify dataset fetch failed: %s", e)
-        os.makedirs("./output", exist_ok=True)
-        with open(pl._debug_dump_path("apify_raw.json"), "w", encoding="utf-8") as f:
-            json.dump({"error": str(e)}, f, indent=2)
-        return []
-
-    if is_leads_finder:
-        leads = _parse_leads_finder_results(items)
-        pl.log.info("Apify (leads-finder) returned %d leads.", len(leads))
-        return leads
-
-    if is_crawlerbros:
-        leads = _parse_crawlerbros_results(items)
-        pl.log.info("Apify (crawlerbros) returned %d leads.", len(leads))
-        return leads
-
-    if is_google_maps:
-        leads = _parse_google_maps_lead_scraper_results(items)
-        pl.log.info("Apify (Google Maps Lead Scraper) returned %d leads.", len(leads))
-        return leads
-
-    raw_results = []
-    for page in items:
-        # Handle both flat list and nested page formats
-        if isinstance(page, dict):
-            organic_results = page.get("organicResults", [])
-        elif isinstance(page, list):
-            organic_results = page
-        else:
-            organic_results = []
-            
-        for r in organic_results:
-            if isinstance(r, dict) and "linkedin.com/in/" in r.get("url", "").lower():
-                raw_results.append({
-                    "title": r.get("title", ""),
-                    "url": r.get("url", ""),
-                    "description": r.get("description", "")
-                })
-
-    pl.log.info("Found %d raw LinkedIn search results from Google.", len(raw_results))
-    parsed_profiles = parse_search_results_with_gemini(raw_results)
-    
-    leads = []
-    for p in parsed_profiles:
-        name = p.get("name", "")
-        title = p.get("title", "")
-        company = p.get("company", "")
-        domain = p.get("company_domain", "")
-        location = p.get("location", "")
-        url = p.get("linkedin_url", "")
-        
-        email = ""
-        if name and domain:
-            name_parts = name.split()
-            first = name_parts[0].lower() if name_parts else ""
-            last = name_parts[-1].lower() if len(name_parts) >= 2 else ""
-            if first and last:
-                email = f"{first}.{last}@{domain}"
-            elif first:
-                email = f"{first}@{domain}"
-                
-        lead = {
-            "name":         pl._safe(name),
-            "title":        pl._safe(title),
-            "company":      pl._safe(company),
-            "location":     pl._safe(location),
-            "email":        pl._safe(email),
-            "linkedin_url": pl._safe(url),
-            "source":       "apify",
-            "_verification_status": "unverified",
-            "_confidence_score":    50.0,
-        }
-
-        # Preserve Apify domain and raw organic search results metadata.
-        # NOTE: the email above is synthesized from this same `domain` guess,
-        # so domain-match will trivially read EXACT for Apify-sourced leads —
-        # it isn't an independent verification signal for this source.
-        lead["apify_company_domain"] = domain
-        lead["company_domain"] = pl.normalize_domain(domain)
-        matching_raw = next((r for r in raw_results if r.get("url") == url), None)
-        if matching_raw:
-            for k, v in matching_raw.items():
-                if k not in ["title", "url", "description"]:
-                    lead[f"apify_{k}"] = v
-                else:
-                    lead[f"apify_raw_{k}"] = v
-
-        leads.append(lead)
-
-    pl.log.info("Apify returned %d leads.", len(leads))
-    return leads
-
-
-# crawlerbros/lead-finder is a purpose-built lead-search actor — live-tested
-# and confirmed to work via the API with no plan restriction (unlike
-# code_crafter/leads-finder below, which is code-ready but blocked on the
-# current free Apify plan). Every input field is genuinely free text (no
-# hidden enums — confirmed live, not just from docs) so this mapping is much
-# simpler than leads-finder's. It returns clean structured contact fields
-# directly (no Gemini guessing needed), but — live-confirmed — no
-# firmographic data (industry/technology/description), so Org Enrichment is
-# still what fills those columns once Apollo credits exist.
-
-def _build_crawlerbros_input(icp: dict, max_leads: int, company_names: Optional[list[str]] = None) -> dict:
-    """Maps the ICP to crawlerbros/lead-finder's simple free-text filter
-    schema: jobTitles, locations, industries, companyNames, maxLeads.
-
-    company_names: populated by the People Discovery stage once companies
-    have been validated, scoping this actor's search to exactly that list —
-    the actor's schema has always documented this field, it just went unused
-    before company-first search existed. Real accepted length/format is
-    unverified (the actor's live-testing notes above never exercised it) —
-    worth a live check if a very large validated-company list gets truncated
-    unexpectedly."""
-    industry = pl._bi_industry(icp)
-    run_input: dict = {"maxLeads": max_leads}
-
-    titles = pl._bi_all_titles(icp)
-    if titles:
-        run_input["jobTitles"] = titles
-
-    locations = pl._bi_all_locations(icp)
-    if locations:
-        run_input["locations"] = locations
-
-    industries = pl._safe_list(industry.get("sub_industries")) or pl._safe_list(industry.get("primary_industry"))
-    if industries:
-        run_input["industries"] = industries
-
-    if company_names:
-        run_input["companyNames"] = company_names
-
-    return run_input
-
-
-def _parse_crawlerbros_results(items) -> list[dict]:
-    """Maps crawlerbros/lead-finder's structured output directly into the
-    lead schema — no Gemini call needed."""
-    leads = []
-    for page in items:
-        if isinstance(page, list):
-            records = page
-        elif isinstance(page, dict):
-            records = [page]
-        else:
-            records = []
-
-        for r in records:
-            if not isinstance(r, dict):
-                continue
-            lead = {
-                "name":         pl._safe(r.get("full_name")),
-                "title":        pl._safe(r.get("title")),
-                "company":      pl._safe(r.get("company_name")),
-                "location":     pl._safe(r.get("location")),
-                "email":        pl._safe(r.get("email")),
-                "linkedin_url": pl._safe(r.get("linkedin_url")),
-                "source":       "apify",
-                "_verification_status": "unverified",
-                "_confidence_score":    50.0,
-            }
-            lead["company_domain"] = pl.normalize_domain(r.get("company_domain") or "")
-            leads.append(lead)
-
-    return leads
-
-
-# nourishing_courier/google-maps-lead-scraper — a BUSINESS/company-level Google
-# Maps scraper, not a person-search actor like Apollo/crawlerbros. It takes
-# free-text queries exactly like you'd type into Google Maps (e.g. "insurance
-# agencies in Columbus Ohio") and returns one row per business, optionally
-# visiting each business's website to extract a real contact email. There is
-# no person name/title in its output — leads from this source are
-# company-shaped (company/email/phone/address), with name/title left blank.
-# Both the input schema (pulled live from Apify's own actor-definition API,
-# not marketing docs) and the output field names below (from a real live test
-# run — see _parse_google_maps_lead_scraper_results()) were confirmed live,
-# not assumed from documentation, per this session's established discipline.
-
-_GOOGLE_MAPS_MAX_QUERIES = 4   # bounded — each query costs actor runtime/compute
-
-
-def _build_google_maps_lead_scraper_input(icp: dict, max_leads: int) -> dict:
-    """Combines the ICP's industry/business terms with its locations into
-    free-text "X in Y" queries — exactly what a user would type into Google
-    Maps search, per the actor's real input schema (searchQueries: array of
-    strings). Capped at _GOOGLE_MAPS_MAX_QUERIES to bound cost."""
-    industry = pl._bi_industry(icp)
-    terms = pl._dedupe_list(
-        pl._safe_list(industry.get("sub_industries"))
-        or ([industry.get("primary_industry")] if industry.get("primary_industry") else [])
-    )[:2]
-    locations = pl._bi_all_locations(icp)[:2]
-
-    queries = []
-    if terms and locations:
-        for term in terms:
-            for loc in locations:
-                queries.append(f"{term} in {loc}")
-    elif terms:
-        queries = list(terms)
-    elif locations:
-        primary = industry.get("primary_industry") or "businesses"
-        queries = [f"{primary} in {loc}" for loc in locations]
-
-    return {
-        "searchQueries": queries[:_GOOGLE_MAPS_MAX_QUERIES],
-        "maxResults": min(max_leads, 500),   # live-tested schema: 1-500 per query
-        "extractEmails": True,                # the actor's own "killer feature" — live-tested, real emails come back
-        "extractPhotos": False,
-        "extractReviews": False,
-    }
-
-
-def _parse_google_maps_lead_scraper_results(items) -> list[dict]:
-    """Maps the actor's real output shape (confirmed via a live test run —
-    see module docstring above) into the lead schema. No person name/title
-    is available from Google Maps — those fields stay blank; company/email/
-    phone/address are the useful fields here."""
-    leads = []
-    for page in items:
-        if isinstance(page, list):
-            records = page
-        elif isinstance(page, dict):
-            records = [page]
-        else:
-            records = []
-
-        for r in records:
-            if not isinstance(r, dict):
-                continue
-            emails = pl._safe_list(r.get("emails")) or pl._safe_list(r.get("email"))
-            lead = {
-                "name":         "",
-                "title":        "",
-                "company":      pl._safe(r.get("name")),
-                "location":     pl._safe(r.get("address")),
-                "email":        pl._safe(emails[0] if emails else "").lower(),
-                "linkedin_url": "",
-                "source":       "apify",
-                "_verification_status": "unverified",
-                "_confidence_score":    50.0,
-            }
-            lead["email2"] = pl._safe(emails[1]).lower() if len(emails) > 1 else ""
-            lead["phone"] = pl._safe(r.get("phone"))
-            lead["biz_address"] = pl._safe(r.get("address"))
-            lead["biz_category"] = pl._join_list_str(r.get("categories") or r.get("category"))
-            lead["biz_description"] = pl._safe(r.get("category"))
-            lead["company_domain"] = pl.normalize_domain(r.get("website") or "")
-            # Preserve every other raw field with a prefix, matching the
-            # apollo_*/apify_* convention — nothing silently dropped.
-            for k, v in r.items():
-                if k not in ("name", "address", "phone", "email", "emails", "category", "categories", "website"):
-                    lead[f"google_maps_{k}"] = v
-            leads.append(lead)
-
-    return leads
-
-
-# code_crafter/leads-finder is a structured B2B lead database (like Apollo),
-# not a search scraper — it takes real filters and returns real firmographic
-# data directly (industry, company_description, company_technologies, etc.),
-# so unlike the google-search-scraper path above, no Gemini guessing step is
-# needed at all. Kept side-by-side with the original path (not a replacement)
-# so pl.APIFY_ACTOR_ID can be switched back with no code change.
+# code_crafter/leads-finder is a structured B2B lead database — it takes real
+# filters and returns real firmographic data directly (industry,
+# company_description, company_technologies, etc.), so no Gemini guessing
+# step is needed at all.
 
 # code_crafter/leads-finder validates several fields against fixed enums that
 # its documentation page does NOT accurately describe — discovered by
-# live-testing against the actor's real input validation (same lesson as the
-# Bright Data docs earlier this session: trust a live API response over
-# stale/incomplete docs). Kept as module-level constants since there's no way
-# to fetch them dynamically without an API call, and they change rarely.
+# live-testing against the actor's real input validation. Kept as
+# module-level constants since there's no way to fetch them dynamically
+# without an API call, and they change rarely.
 
 _LEADS_FINDER_INDUSTRIES = (
     "information technology & services", "construction", "marketing & advertising", "real estate",
@@ -538,18 +95,43 @@ def _map_industry_to_leads_finder_enum(text: str) -> Optional[str]:
     return None
 
 
+_LEADS_FINDER_COUNTRY_ALIASES = {
+    "usa": "united states", "us": "united states",
+    "uk": "united kingdom", "uae": "united arab emirates",
+}
+
+
 def _map_locations_to_leads_finder(geography: list[str]) -> list[str]:
     """Expands broad regions ("North America", "Europe", "APAC") into the
-    actor's country-only location enum, passing already-specific country
-    names through directly."""
-    countries = []
+    actor's country enum, reformats recognized US states into the actor's
+    "<state>, us" sub-country location shape, and passes recognized country
+    names through (normalizing common aliases like "usa"/"uk" to the
+    actor's actual enum spelling).
+
+    Live-tested: contact_location supports state/city granularity, but ONLY
+    in that exact "<region>, <country>" format (e.g. "california, us") — a
+    bare state name like "alabama" is rejected outright, and since the
+    actor validates the whole request atomically, ONE bad value 400s the
+    ENTIRE call, not just that one location (confirmed: a real run sending
+    "united states" plus all 50 bare state names failed completely on
+    "alabama", the first non-country value). Anything not confidently
+    mappable to the actor's enum is therefore dropped rather than guessed —
+    sending fewer, valid locations beats a single bad one zeroing out every
+    other filter in the request too."""
+    mapped = []
     for g in geography:
         g_lower = g.strip().lower()
         if g_lower in _LEADS_FINDER_REGION_COUNTRIES:
-            countries.extend(_LEADS_FINDER_REGION_COUNTRIES[g_lower])
-        else:
-            countries.append(g_lower)
-    return pl._dedupe_list(countries)
+            mapped.extend(_LEADS_FINDER_REGION_COUNTRIES[g_lower])
+        elif g_lower in pl._KNOWN_US_STATES:
+            mapped.append(f"{g_lower}, us")
+        elif g_lower in _LEADS_FINDER_COUNTRY_ALIASES:
+            mapped.append(_LEADS_FINDER_COUNTRY_ALIASES[g_lower])
+        elif g_lower in pl._KNOWN_COUNTRIES:
+            mapped.append(g_lower)
+        # else: not confidently mappable (an unrecognized state/city/country)
+        # — dropped rather than sent as a guess, see docstring above.
+    return pl._dedupe_list(mapped)
 
 
 def _nearest_leads_finder_revenue_bucket(value: float) -> str:
@@ -559,14 +141,21 @@ def _nearest_leads_finder_revenue_bucket(value: float) -> str:
     return min(_LEADS_FINDER_REVENUE_BUCKETS, key=lambda b: abs(b[1] - value))[0]
 
 
-def _build_leads_finder_input(icp: dict, max_leads: int) -> dict:
+def _build_leads_finder_input(icp: dict, max_leads: int, search_plan: Optional[dict] = None) -> dict:
     """Maps the ICP to code_crafter/leads-finder's structured filter schema.
     Deliberately conservative: email_status is left unset (Stage 6 already
     re-verifies every lead's email regardless of source, so pre-filtering
-    here has no correctness benefit and risks starving results the way an
-    over-constrained filter set did earlier for _build_apify_input()) and
+    here has no correctness benefit and risks starving results) and
     company_stage values with no clean funding-stage equivalent (e.g.
-    "Enterprise") are skipped rather than guessed."""
+    "Enterprise") are skipped rather than guessed.
+
+    search_plan (pipeline/search_planner.py's Stage 2 output) — when
+    supplied, replaces the industry-enum matching and the keyword
+    selection below with the Planner's semantic classification / curated
+    priority tiers, since both are known-weak points of the plain
+    ICP->actor mapping (see search_planner.py's module docstring).
+    search_plan=None preserves the exact previous behavior, unchanged, for
+    every existing caller."""
     run_input: dict = {"fetch_count": max_leads}
 
     titles = pl._bi_all_titles(icp)
@@ -640,32 +229,57 @@ def _build_leads_finder_input(icp: dict, max_leads: int) -> dict:
     if locations:
         run_input["contact_location"] = locations
 
-    industry = pl._bi_industry(icp)
-    industry_candidates = pl._safe_list(industry.get("sub_industries")) + pl._safe_list(industry.get("primary_industry"))
-    mapped_industries = []
-    for i in industry_candidates:
-        mapped = _map_industry_to_leads_finder_enum(i)
-        if mapped:
-            mapped_industries.append(mapped)
+    if search_plan and search_plan.get("industry_candidates"):
+        # Search Planner already picked real, enum-verified values via
+        # semantic classification (see search_planner.py) — use them
+        # directly instead of the literal substring matcher below, which
+        # can silently return nothing (or a wrong bucket) for a specific
+        # or compound industry phrase.
+        mapped_industries = [
+            c["value"] for c in search_plan["industry_candidates"]
+            if c.get("value") in _LEADS_FINDER_INDUSTRIES
+        ]
+    else:
+        industry = pl._bi_industry(icp)
+        industry_candidates = pl._safe_list(industry.get("sub_industries")) + pl._safe_list(industry.get("primary_industry"))
+        mapped_industries = []
+        for i in industry_candidates:
+            mapped = _map_industry_to_leads_finder_enum(i)
+            if mapped:
+                mapped_industries.append(mapped)
     if mapped_industries:
         run_input["company_industry"] = pl._dedupe_list(mapped_industries)
 
-    # The actor-native way to do what Claim Verification has to work around
-    # via a separate web search: ask for the specific named technology
-    # directly as a search-time filter, using the same cleaned/prioritized
-    # term the Apollo adapter uses (confirmed_technologies over generic crm).
-    keywords = []
-    tech = pl._bi_primary_technology(icp)
-    if tech:
-        keywords.append(tech)
-    keywords.extend(pl._bi_keyword_pool(icp)[:5])
+    if search_plan and (search_plan.get("high_priority_keywords") or search_plan.get("secondary_keywords")):
+        # Planner-curated, priority-ranked terms — not a blind first-5
+        # truncation of the raw BI keyword pool (see search_planner.py's
+        # module docstring for why that truncation loses specificity).
+        keywords = pl._dedupe_list(
+            list(search_plan.get("high_priority_keywords") or [])
+            + list(search_plan.get("company_type_terms") or [])
+            + list(search_plan.get("secondary_keywords") or [])
+        )
+    else:
+        # The actor-native way to do what Claim Verification has to work around
+        # via a separate web search: ask for the specific named technology
+        # directly as a search-time filter, using the same cleaned/prioritized
+        # term used elsewhere (confirmed_technologies over generic crm).
+        keywords = []
+        tech = pl._bi_primary_technology(icp)
+        if tech:
+            keywords.append(tech)
+        keywords.extend(pl._bi_keyword_pool(icp)[:5])
     if keywords:
         run_input["company_keywords"] = pl._dedupe_list(keywords)
 
-    # negative_keywords/exclude_industries/excluded_locations are short
-    # terms now (see pl._icp_schema_block()), but this actor's own
-    # company_not_keywords semantics haven't been live-validated for this
-    # schema yet, so left out here rather than guessing.
+    # negative_keywords/exclude_industries/excluded_locations (from the ICP
+    # directly, or from search_plan["negative_keywords"] — see
+    # search_planner.py) are deliberately never sent to the actor as a
+    # request field: this actor's own company_not_keywords semantics have
+    # never been live-validated for this schema, and one bad field 400s
+    # the entire atomic request. Applied instead as a client-side post-
+    # filter on already-returned leads — see _apply_negative_keywords()
+    # below, called from scrape_apify().
 
     # size enum (live-validated): 1-10, 11-20, 21-50, 51-100, 101-200, 201-500,
     # 501-1000, 1001-2000, 2001-5000, 5001-10000, 10001-20000, 20001-50000, 50000+
@@ -724,9 +338,8 @@ def _build_leads_finder_input(icp: dict, max_leads: int) -> dict:
 
 def _parse_leads_finder_results(items) -> list[dict]:
     """Maps code_crafter/leads-finder's structured output directly into the
-    lead schema — no Gemini call needed, unlike the google-search-scraper
-    path, since the actor already returns real fields instead of a snippet
-    to guess from."""
+    lead schema — the actor already returns real fields, no guessing step
+    needed."""
     leads = []
     for page in items:
         if isinstance(page, list):
@@ -773,58 +386,134 @@ def _parse_leads_finder_results(items) -> list[dict]:
     return leads
 
 
-def _build_apify_input(icp: dict, max_leads: int) -> dict:
+def _apply_negative_keywords(leads: list[dict], negative_keywords: list[str]) -> list[dict]:
+    """Client-side post-filter for search_plan["negative_keywords"] (see
+    pipeline/search_planner.py) — deliberately never sent to the actor as
+    a request field (see the negative_keywords comment in
+    _build_leads_finder_input() above). Drops a lead if any negative term
+    appears in its company/title/description/keyword text."""
+    terms = [t.strip().lower() for t in (negative_keywords or []) if t and t.strip()]
+    if not terms:
+        return leads
+
+    kept = []
+    for lead in leads:
+        text = " ".join(
+            str(lead.get(f) or "") for f in ("company", "title", "biz_description", "biz_category")
+        ).lower()
+        if any(term in text for term in terms):
+            continue
+        kept.append(lead)
+    return kept
+
+
+def scrape_apify(icp: dict, max_leads: int = 50, search_plan: Optional[dict] = None) -> list[dict]:
     """
-    Builds the input payload for the `apify/google-search-scraper` actor.
+    Runs the code_crafter/leads-finder Apify actor with the ICP criteria —
+    the sole lead-sourcing platform this pipeline uses.
+
+    Apify docs: https://docs.apify.com/api/v2#/reference/actors/run-collection/run-actor
+    Endpoint: POST https://api.apify.com/v2/acts/{actorId}/runs
+
+    search_plan: Stage 2's output (pipeline/search_planner.py) — see
+    _build_leads_finder_input() for how it changes the request, and
+    _apply_negative_keywords() for how its negative_keywords get applied
+    to the response instead. None preserves prior behavior exactly.
+
+    Returns a list of raw lead dicts.
     """
-    queries_list = []
+    api_token = os.getenv("APIFY_API_TOKEN")
+    actor_id = os.getenv("APIFY_ACTOR_ID", "code_crafter/leads-finder")
 
-    industry = pl._bi_industry(icp)
-    titles = pl._bi_all_titles(icp)
-    main_tech = pl._bi_primary_technology(icp)
-    industries = pl._safe_list(industry.get("sub_industries")) or pl._safe_list(industry.get("primary_industry"))
-    main_ind = industries[0] if industries else ""
-    locations = pl._bi_all_locations(icp)
+    pl.log.info("Stage 2 — Running Apify actor '%s' …", actor_id)
 
-    # Exclusions
-    exclusions = pl._bi_negative_keywords(icp)
+    if not api_token:
+        pl.log.warning("APIFY_API_TOKEN not set — skipping Apify scrape.")
+        return []
 
-    exclusion_str = ""
-    if exclusions:
-        exclusion_str = " " + " ".join([f'-"{e}"' for e in exclusions])
+    run_input = _build_leads_finder_input(icp, max_leads, search_plan=search_plan)
+    pl.log.info("Apify Run Input payload: %s", json.dumps(run_input))
 
-    # Pair each job title with ONE distinguishing term — technology when
-    # available, else industry. Live-tested combining both unconditionally
-    # (requiring two exact quoted phrases plus title plus location all on
-    # the same page) and it collapsed real Google result counts from 52 raw
-    # leads to 1 — Google's exact-phrase-AND search is too restrictive for
-    # that many simultaneous quoted requirements. The real fix (see
-    # pl._bi_primary_technology()) is picking the RIGHT single term, not
-    # stacking more of them.
-    for title in titles[:6]:  # Limit to top 6 titles
-        term = f'"{title}"'
-        if main_tech:
-            term += f' "{main_tech}"'
-        elif main_ind:
-            term += f' "{main_ind}"'
-        if locations:
-            term += f' "{locations[0]}"'
-        term += exclusion_str
-        queries_list.append(f"site:linkedin.com/in/ {term}")
+    headers = {"Content-Type": "application/json"}
+    # Apify actor slug uses ~ instead of / in the URL path
+    actor_path = actor_id.replace("/", "~")
+    run_url = (
+        f"https://api.apify.com/v2/acts/{actor_path}/runs"
+        f"?token={api_token}&waitForFinish=300"
+    )
 
-    # Also add a deterministic fallback query built from the canonical keyword pool
-    search_keywords = pl._bi_keyword_pool(icp)
-    if search_keywords:
-        kw_term = " ".join(f'"{kw}"' for kw in search_keywords[:6])
-        queries_list.append(f"site:linkedin.com/in/ {kw_term}{exclusion_str}")
+    try:
+        resp = requests.post(run_url, json=run_input, headers=headers, timeout=360)
+        resp.raise_for_status()
+        run_data = resp.json().get("data", {})
+        dataset_id = run_data.get("defaultDatasetId")
+        run_id = run_data.get("id")
+        run_status = run_data.get("status")
+    except requests.exceptions.HTTPError as e:
+        pl.log.error("Apify run error %s: %s", resp.status_code, resp.text)
+        return []
+    except requests.exceptions.RequestException as e:
+        pl.log.error("Apify request failed: %s", e)
+        return []
 
-    full_queries = "\n".join(queries_list)
+    if not dataset_id:
+        pl.log.error("Apify run did not return a dataset ID.")
+        return []
 
-    return {
-        "queries":          full_queries,
-        "maxPagesPerQuery": 2,
-        "resultsPerPage":   50,
-        "mobileResults":    False
-    }
+    # waitForFinish=300 can expire before a slow run genuinely finishes (a
+    # higher max_leads request can legitimately take 2-3+ minutes) — the run
+    # keeps going server-side, but its dataset may still be empty/partial at
+    # this exact moment. Silently trusting that as "the run returned 0
+    # leads" would be misleading and hard to debug later, so poll the run's
+    # real status a bit longer rather than assuming it's done.
+    if run_status != "SUCCEEDED" and run_id:
+        pl.log.warning(
+            "Apify run %s hadn't finished after the initial wait (status=%s) — polling a bit longer …",
+            run_id, run_status,
+        )
+        poll_url = f"https://api.apify.com/v2/actor-runs/{run_id}?token={api_token}"
+        for _ in range(12):  # up to ~2 more minutes
+            time.sleep(10)
+            try:
+                poll_resp = requests.get(poll_url, timeout=30)
+                poll_resp.raise_for_status()
+                run_status = poll_resp.json().get("data", {}).get("status")
+            except requests.exceptions.RequestException as e:
+                pl.log.warning("Apify run status poll failed: %s", e)
+                break
+            if run_status in ("SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"):
+                break
+        pl.log.info("Apify run %s finished polling with status=%s", run_id, run_status)
 
+    # Fetch results from the dataset
+    dataset_url = (
+        f"https://api.apify.com/v2/datasets/{dataset_id}/items"
+        f"?token={api_token}&format=json"
+    )
+    try:
+        resp = requests.get(dataset_url, timeout=60)
+        resp.raise_for_status()
+        items = resp.json()
+        os.makedirs("./output", exist_ok=True)
+        with open(pl._debug_dump_path("apify_raw.json"), "w", encoding="utf-8") as f:
+            json.dump(items, f, indent=2)
+    except requests.exceptions.RequestException as e:
+        pl.log.error("Apify dataset fetch failed: %s", e)
+        os.makedirs("./output", exist_ok=True)
+        with open(pl._debug_dump_path("apify_raw.json"), "w", encoding="utf-8") as f:
+            json.dump({"error": str(e)}, f, indent=2)
+        return []
 
+    leads = _parse_leads_finder_results(items)
+    pl.log.info("Apify (leads-finder) returned %d leads.", len(leads))
+
+    if search_plan and search_plan.get("negative_keywords"):
+        before = len(leads)
+        leads = _apply_negative_keywords(leads, search_plan["negative_keywords"])
+        if len(leads) != before:
+            pl.log.info(
+                "Search Planner negative keywords filtered out %d/%d leads.",
+                before - len(leads), before,
+            )
+
+    return leads

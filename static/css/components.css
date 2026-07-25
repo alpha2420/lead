@@ -133,15 +133,11 @@
     .badge-invalid   { background: var(--red-tint);   color: var(--red);         border: 1px solid #FECACA; }
     .badge-catchall  { background: var(--amber-tint); color: var(--amber-light); border: 1px solid #FDE68A; }
     .badge-other     { background: var(--surface);    color: var(--text-muted);  border: 1px solid var(--border-hi); }
-    .badge-apollo    { background: var(--blue-tint);  color: var(--blue);        border: 1px solid #BFDBFE; }
     .badge-apify     { background: var(--amber-tint); color: var(--amber-light); border: 1px solid #FDE68A; }
-    .badge-explorium { background: var(--green-tint); color: var(--green);       border: 1px solid #A7F3D0; }
     body.dark-theme .badge-valid     { border-color: rgba(16, 185, 129, 0.35); }
     body.dark-theme .badge-invalid   { border-color: rgba(220, 38, 38, 0.35); }
     body.dark-theme .badge-catchall  { border-color: rgba(217, 119, 6, 0.35); }
-    body.dark-theme .badge-apollo    { border-color: rgba(37, 99, 235, 0.35); }
     body.dark-theme .badge-apify     { border-color: rgba(217, 119, 6, 0.35); }
-    body.dark-theme .badge-explorium { border-color: rgba(16, 185, 129, 0.35); }
 
     /* Score bars */
     .score-bar-wrap { display: flex; align-items: center; gap: 8px; }
@@ -184,7 +180,7 @@
     .card-title { display: flex; align-items: center; gap: 8px; font-size: 0.71rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 13px; }
     .card-title svg { color: var(--blue); }
 
-    .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; height: 100%; }
+    .charts-grid { display: grid; grid-template-columns: 1fr; gap: 13px; height: 100%; }
     .chart-card { display: flex; flex-direction: column; min-height: 260px; }
     .chart-wrapper { flex: 1; position: relative; min-height: 200px; }
 
@@ -211,10 +207,63 @@
     .btn-run-custom:hover { background: var(--ink-hover); border-color: var(--ink-hover); }
 
     .icp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; }
-    .icp-group { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 14px 15px; box-shadow: var(--shadow-card); }
+    .icp-group { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 14px 15px; box-shadow: var(--shadow-card), inset 0 1px 0 rgba(255, 255, 255, 0.5); }
+    body.dark-theme .icp-group { box-shadow: var(--shadow-card), inset 0 1px 0 rgba(255, 255, 255, 0.04); }
     .icp-group-title { font-size: 0.73rem; font-weight: 700; color: var(--text); letter-spacing: -0.01em; padding-bottom: 10px; margin-bottom: 12px; border-bottom: 1px solid var(--border); }
     .icp-item-label { font-size: 0.61rem; font-weight: 700; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 5px; }
     .icp-tags { display: flex; flex-wrap: wrap; gap: 5px; }
+    .icp-empty { color: var(--text-dim); font-size: 0.75rem; }
+
+    /* Hero: summary + confidence, replaces the old separate numbered cards */
+    .icp-hero {
+      display: flex; gap: 18px; align-items: stretch;
+      background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-md);
+      padding: 16px 18px; box-shadow: var(--shadow-card), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+    }
+    body.dark-theme .icp-hero { box-shadow: var(--shadow-card), inset 0 1px 0 rgba(255, 255, 255, 0.04); }
+    .icp-hero-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; justify-content: center; }
+    .icp-hero-label { font-size: 0.62rem; font-weight: 700; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.08em; }
+    .icp-hero-text { font-size: 0.86rem; font-weight: 500; color: var(--text); line-height: 1.55; }
+    .icp-hero-confidence {
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+      padding-left: 18px; border-left: 1px solid var(--border); flex-shrink: 0; min-width: 92px;
+    }
+    .icp-confidence-score { font-size: 1.6rem; font-weight: 800; color: var(--text); letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+    .icp-confidence-score span { font-size: 0.68rem; font-weight: 600; color: var(--text-dim); }
+    .icp-confidence-label { font-size: 0.6rem; font-weight: 700; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; }
+
+    .icp-warning {
+      grid-column: span 2; display: flex; gap: 9px; align-items: flex-start;
+      background: var(--red-tint); border: 1px solid rgba(220, 38, 38, 0.25); border-radius: var(--radius-md);
+      padding: 12px 14px; font-size: 0.75rem; color: var(--text); line-height: 1.5;
+    }
+
+    /* Clean section header: color-coded dot instead of numbered emoji */
+    .icp-section-title { display: flex; align-items: center; gap: 8px; font-size: 0.73rem; font-weight: 700; color: var(--text); letter-spacing: -0.01em; padding-bottom: 10px; margin-bottom: 12px; border-bottom: 1px solid var(--border); }
+    .icp-section-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+    .icp-dot-industry  { background: var(--amber-light); }
+    .icp-dot-geo       { background: var(--green-light); }
+    .icp-dot-tech      { background: var(--violet); }
+    .icp-dot-committee { background: var(--blue); }
+    .icp-dot-company   { background: var(--cyan); }
+    .icp-dot-search    { background: var(--indigo); }
+
+    .icp-table-wrap { overflow-x: auto; }
+
+    /* Buying-role / weight coloring, replacing inline per-row JS color lookups */
+    .icp-cell-strong { font-weight: 700; color: var(--text-muted); }
+    .icp-role-decision-maker { color: var(--green); font-weight: 700; }
+    .icp-role-champion       { color: var(--green-light); font-weight: 700; }
+    .icp-role-influencer     { color: var(--amber-light); font-weight: 700; }
+    .icp-role-blocker        { color: var(--red); font-weight: 700; }
+    .icp-weight-high     { color: var(--green); font-weight: 700; }
+    .icp-weight-medium   { color: var(--amber-light); font-weight: 700; }
+    .icp-weight-low      { color: var(--text-dim); font-weight: 700; }
+    .icp-weight-negative { color: var(--red); font-weight: 700; }
+
+    /* Secondary/meta modules — reuses the AI Target Strategy accordion look */
+    .icp-more-title { grid-column: span 2; font-size: 0.66rem; font-weight: 700; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.08em; margin: 2px 0 -3px 2px; }
+    .icp-more-group { grid-column: span 2; display: flex; flex-direction: column; }
 
     .tag { display: inline-flex; align-items: center; padding: 3px 9px; border-radius: 99px; background: var(--surface); border: 1px solid var(--border); color: var(--text-muted); font-size: 0.68rem; font-weight: 500; line-height: 1.5; transition: var(--transition); }
     .tag:hover { border-color: var(--border-hi); color: var(--text); }

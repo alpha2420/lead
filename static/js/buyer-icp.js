@@ -35,6 +35,47 @@
       }
     }
 
+    function handleBuyerWebsiteKey(event) {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        generateBuyerICPFromWebsite();
+      }
+    }
+
+    async function generateBuyerICPFromWebsite() {
+      const website = document.getElementById('buyerWebsiteUrl').value.trim();
+      if (!website) {
+        showAlert('warning', 'Enter a website URL first.');
+        return;
+      }
+
+      const btn = document.getElementById('btnGenerateBuyerICPFromWebsite');
+      const originalLabel = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = 'Analyzing…';
+
+      try {
+        const res = await fetch('/api/generate-buyer-icp-from-website', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ website }),
+        });
+        const data = await res.json();
+        if (data.error || data.status !== 'success') throw new Error(data.error || data.message || 'Failed to generate buyer profile');
+
+        lastBuyerICP = data.icp;
+        lastBuyerReport = data.buyer_report;
+        renderBuyerReport(lastBuyerReport);
+        document.getElementById('buyerResults').style.display = 'block';
+        showAlert('success', `Buyer profile generated from ${data.site_title || data.source_url || website}.`);
+      } catch (err) {
+        showAlert('error', `Failed to generate buyer profile: ${err.message}`);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = originalLabel;
+      }
+    }
+
     function renderBuyerReport(report) {
       const panel = document.getElementById('buyerPanel');
       const size = report.company_size || {};
@@ -130,17 +171,6 @@
       }
 
       const target = parseInt(document.getElementById('targetLeads').value) || 25;
-      const max_pages = parseInt(document.getElementById('maxPages').value) || 10;
-      const enable_apollo = document.getElementById('enableApollo').checked;
-      const enable_apify = document.getElementById('enableApify').checked;
-      const enable_explorium = document.getElementById('enableExplorium').checked;
-      const explorium_api_key = document.getElementById('exploriumApiKey').value.trim();
-      const verifier_provider = document.querySelector('input[name="verifierProvider"]:checked').value;
-
-      if (!enable_apollo && !enable_apify && !enable_explorium) {
-        showAlert('warning', 'Please enable at least one scraper (Apollo, Apify, or Explorium) to search for buyers.');
-        return;
-      }
 
       hideAlert();
       switchTab('tab-crm');
@@ -161,14 +191,8 @@
           body: JSON.stringify({
             icp: lastBuyerICP,
             target,
-            max_pages,
-            enable_apollo,
-            enable_apify,
-            enable_explorium,
-            explorium_api_key,
-            verifier_provider,
+            verifier_provider: 'gmail_bounce',
             profile: selectedSourceProfile,
-            apify_actor: getSelectedApifyActor(),
           }),
         });
         const data = await res.json();

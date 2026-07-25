@@ -31,19 +31,25 @@
         i => { manualICP.exclusions.splice(i, 1); rerender(); });
     }
 
+    // Manual Search now shares the one persistent #alertBox (see
+    // templates/index.html) instead of its own #manualAlertBox — kept as
+    // a thin alias so call sites don't need to change.
     function showManualAlert(type, msg) {
-      const el = document.getElementById('manualAlertBox');
-      el.className = `alert ${type} show`;
-      el.textContent = msg;
+      showAlert(type, msg);
     }
 
     // Builds the same ICP object shape the AI produces, from manually-entered
-    // criteria, then runs the pipeline through the normal startRun() path.
-    function runManualSearch() {
+    // criteria. Returns true/false rather than running the pipeline itself
+    // — static/js/search-wizard.js's continueFromManual() calls this, then
+    // advances to Section 2 (Refine ICP) on success, same as the AI/Website
+    // paths. Stops short of startRun() (unlike this function's predecessor,
+    // runManualSearch()) since Manual Search no longer has its own
+    // one-click run shortcut — see search-wizard.js's module docstring.
+    function buildICPFromManualFields() {
       if (!manualICP.jobTitles.length && !manualICP.industries.length &&
           !manualICP.locations.length && !manualICP.keywords.length) {
         showManualAlert('warning', 'Add at least a job title, industry, location, or keyword to search.');
-        return;
+        return false;
       }
 
       // Clear any leftover text in the AI chat box so startRun()'s
@@ -103,8 +109,7 @@
       };
 
       renderICP(lastParsedICP);
-      showManualAlert('success', 'Criteria applied — starting pipeline run…');
-      startRun();
+      return true;
     }
 
     function syncRefinementPanelOnly() {
@@ -187,7 +192,8 @@
       bindTagField('refine-competitors', 'market_intelligence', 'competitors');
       const marketPositionEl = document.getElementById('market-position-static');
       if (marketPositionEl) {
-        const positions = lastParsedICP.market_intelligence.market_position || [];
+        const rawPositions = lastParsedICP.market_intelligence.market_position;
+        const positions = Array.isArray(rawPositions) ? rawPositions : (rawPositions ? [rawPositions] : []);
         marketPositionEl.innerHTML = positions.length
           ? positions.map(p => `<span class="tag">${escapeHtml(String(p))}</span>`).join('')
           : '<span style="color:var(--text-dim); font-size:0.66rem;">None specified</span>';
@@ -227,113 +233,6 @@
       if (mod) mod.classList.toggle('open');
     }
 
-    // ── Coverage Analysis ─────────────────────────────────────────────────────
-    async function analyzeCoverage() {
-      if (!lastParsedICP) return;
-      const btn = document.getElementById('btnAnalyzeCoverage');
-      const resultsEl = document.getElementById('coverageResults');
-      const target = parseInt(document.getElementById('targetLeads')?.value) || 25;
-
-      btn.disabled = true;
-      btn.textContent = 'Analyzing…';
-      resultsEl.style.display = 'none';
-
-      try {
-        const res = await fetch('/api/estimate-coverage', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ icp: lastParsedICP, target }),
-        });
-        const data = await res.json();
-        if (data.status !== 'success') throw new Error(data.message || 'Estimate failed');
-        renderCoverageResults(data.estimate);
-      } catch (err) {
-        resultsEl.innerHTML = `<div class="coverage-unavailable">Coverage estimate failed: ${escapeHtml(err.message)}</div>`;
-        resultsEl.style.display = 'block';
-      } finally {
-        btn.disabled = false;
-        btn.textContent = 'Re-analyze Coverage';
-      }
-    }
-
-    function renderCoverageResults(estimate) {
-      const resultsEl = document.getElementById('coverageResults');
-      resultsEl.style.display = 'block';
-
-      if (!estimate || !estimate.available) {
-        const reason = (estimate && estimate.reason) || 'Coverage estimates are currently unavailable.';
-        resultsEl.innerHTML = `<div class="coverage-unavailable">${escapeHtml(reason)}</div>`;
-        return;
-      }
-
-      const stars = '★'.repeat(estimate.coverage_rating) + '☆'.repeat(5 - estimate.coverage_rating);
-
-      const flagsHtml = estimate.narrow_flags.length
-        ? estimate.narrow_flags.map(f => `
-            <div class="coverage-flag">
-              <span>⚠</span>
-              <span>${escapeHtml(f.label)} may be reducing your results by ~${f.pct_reduction}% (${f.current_estimate.toLocaleString()} vs. ${f.without_estimate.toLocaleString()} without it)</span>
-            </div>
-          `).join('')
-        : `<div class="coverage-empty-note">No unusually narrow filters detected.</div>`;
-
-      const suggestionsHtml = estimate.suggestions.length
-        ? estimate.suggestions.map((s, i) => `
-            <div class="coverage-suggestion">
-              <div class="coverage-suggestion-text">
-                Include <strong>${escapeHtml(s.value)}</strong>
-                <span class="coverage-suggestion-delta">+${s.estimated_reach_delta.toLocaleString()} estimated people</span>
-              </div>
-              <button class="coverage-include-btn" id="coverage-suggest-btn-${i}" onclick="includeCoverageSuggestion(${i}, this)">Include</button>
-            </div>
-          `).join('')
-        : `<div class="coverage-empty-note">No broadening suggestions right now.</div>`;
-
-      resultsEl.innerHTML = `
-        <div class="coverage-stats">
-          <div class="coverage-stat">
-            <div class="coverage-stat-value">${estimate.estimated_companies.toLocaleString()}</div>
-            <div class="coverage-stat-label">Est. Companies</div>
-          </div>
-          <div class="coverage-stat">
-            <div class="coverage-stat-value">${estimate.estimated_people.toLocaleString()}</div>
-            <div class="coverage-stat-label">Est. People</div>
-          </div>
-        </div>
-        <div class="coverage-rating-row">${stars}</div>
-        <div class="coverage-source-note">Estimated via Apollo.io — Apify/Explorium not yet supported</div>
-        <div class="coverage-section-title">Potential Issues</div>
-        ${flagsHtml}
-        <div class="coverage-section-title">Suggestions</div>
-        ${suggestionsHtml}
-      `;
-
-      // Stash suggestions on the element so includeCoverageSuggestion() can
-      // read the exact value/field_to_apply without re-parsing the DOM.
-      resultsEl._coverageSuggestions = estimate.suggestions;
-    }
-
-    function includeCoverageSuggestion(index, btnEl) {
-      const resultsEl = document.getElementById('coverageResults');
-      const suggestion = resultsEl._coverageSuggestions && resultsEl._coverageSuggestions[index];
-      if (!suggestion || !lastParsedICP) return;
-
-      const [module, field] = suggestion.field_to_apply === 'likely_technologies'
-        ? ['technology_intelligence', 'likely_technologies']
-        : ['industry_intelligence', 'industry_keywords'];
-
-      if (!lastParsedICP[module]) lastParsedICP[module] = {};
-      if (!Array.isArray(lastParsedICP[module][field])) lastParsedICP[module][field] = [];
-      if (!lastParsedICP[module][field].includes(suggestion.value)) {
-        lastParsedICP[module][field].push(suggestion.value);
-      }
-
-      btnEl.disabled = true;
-      btnEl.textContent = 'Included';
-      syncRefinementPanelOnly();
-      renderICP(lastParsedICP);
-    }
-
     // ── ICP Panel ──────────────────────────────────────────────────────────────
     // Shared by renderICP() and renderBuyerReport() — hoisted to module scope
     // so the Buyer ICP tab doesn't duplicate this markup.
@@ -370,7 +269,6 @@
       const intent     = icp.intent_intelligence || {};
       const search     = icp.search_intelligence || {};
       const leadScoring  = Array.isArray(icp.lead_scoring) ? icp.lead_scoring : [];
-      const dataSources  = icp.data_sources || [];
       const confidence   = icp.confidence || {};
       const icpSummary   = icp.icp_summary || 'No summary generated yet.';
       const inputFlags   = icp.input_flags || {};
@@ -384,8 +282,8 @@
       const allTechFlat = _dedupeArr([...(tech.confirmed_technologies || []), ...(tech.likely_technologies || []), ...(tech.technology_categories || [])]);
       const searchKeywords = _dedupeArr([...(search.business_keywords || []), ...(search.product_keywords || [])]);
 
-      const influenceColor = (v) => ({'decision maker':'#10b981','champion':'#34d399','influencer':'#f59e0b','blocker':'#ef4444'}[(v||'').toLowerCase()] || 'var(--text-muted)');
-      const weightColor    = (v) => ({high:'#10b981', medium:'#f59e0b', low:'#9d9da8', negative:'#ef4444'}[(v||'').toLowerCase()] || 'var(--text-muted)');
+      const roleClass   = (v) => ({'decision maker':'icp-role-decision-maker','champion':'icp-role-champion','influencer':'icp-role-influencer','blocker':'icp-role-blocker'}[(v||'').toLowerCase()] || '');
+      const weightClass = (v) => ({high:'icp-weight-high', medium:'icp-weight-medium', low:'icp-weight-low', negative:'icp-weight-negative'}[(v||'').toLowerCase()] || '');
 
       // Populate Top Bar
       const topBar = document.getElementById('icpTopBar');
@@ -429,25 +327,36 @@
       }
 
       // Create strategic grid content — Business Intelligence layer: 8
-      // intelligence modules + scoring/sources/confidence
+      // intelligence modules + scoring/sources/confidence. Targeting-critical
+      // modules (industry/geo/tech/committee/company/search) stay always
+      // visible; supplementary/explanatory ones collapse into "More
+      // Intelligence" accordions (same component as the AI Target Strategy
+      // sidebar) so the tab doesn't read as a wall of 12 equal-weight cards.
       panel.innerHTML = `
         ${inputFlags.possible_injection ? `
-        <div class="icp-group" style="grid-column: span 2; background: rgba(220, 38, 38, 0.06); border-color: rgba(220, 38, 38, 0.25);">
-          <div style="font-size: 0.72rem; color: var(--text);">⚠ Part of your input looked like an instruction and was ignored — this ICP reflects only your legitimate targeting criteria.</div>
+        <div class="icp-warning">
+          <span>⚠</span>
+          <span>Part of your input looked like an instruction and was ignored — this ICP reflects only your legitimate targeting criteria.</span>
         </div>` : ''}
 
-        <!-- 1. ICP Summary -->
-        <div class="icp-group" style="grid-column: span 2; background: rgba(99, 102, 241, 0.03);">
-          <div class="icp-group-title" style="color: var(--purple-light); font-size: 0.8rem;">⚡ 1. ICP Summary</div>
-          <div style="font-size: 0.8rem; color: var(--text); line-height: 1.55; font-weight: 500;">${escapeHtml(icpSummary)}</div>
+        <!-- Summary + Confidence -->
+        <div class="icp-hero" style="grid-column: span 2;">
+          <div class="icp-hero-main">
+            <div class="icp-hero-label">ICP Summary</div>
+            <div class="icp-hero-text">${escapeHtml(icpSummary)}</div>
+          </div>
+          <div class="icp-hero-confidence">
+            <div class="icp-confidence-score">${confidence.score != null ? confidence.score : '—'}<span>/100</span></div>
+            <div class="icp-confidence-label">Confidence</div>
+          </div>
         </div>
 
-        <!-- 2. Industry Intelligence -->
+        <!-- Industry -->
         <div class="icp-group">
-          <div class="icp-group-title">🏷️ 2. Industry Intelligence</div>
+          <div class="icp-section-title"><span class="icp-section-dot icp-dot-industry"></span>Industry</div>
           <div style="display: flex; flex-direction: column; gap: 10px;">
             <div class="icp-item">
-              <div class="icp-item-label">Primary Industry & Sub-Industries</div>
+              <div class="icp-item-label">Primary & Sub-Industries</div>
               ${makeTags(industryList)}
             </div>
             <div class="icp-item">
@@ -465,9 +374,9 @@
           </div>
         </div>
 
-        <!-- 3. Geography Intelligence -->
+        <!-- Geography -->
         <div class="icp-group">
-          <div class="icp-group-title">🌍 3. Geography Intelligence</div>
+          <div class="icp-section-title"><span class="icp-section-dot icp-dot-geo"></span>Geography</div>
           <div style="display: flex; flex-direction: column; gap: 10px;">
             <div class="icp-item">
               <div class="icp-item-label">Regions</div>
@@ -484,9 +393,9 @@
           </div>
         </div>
 
-        <!-- 4. Technology Intelligence -->
+        <!-- Technology -->
         <div class="icp-group">
-          <div class="icp-group-title">💻 4. Technology Intelligence</div>
+          <div class="icp-section-title"><span class="icp-section-dot icp-dot-tech"></span>Technology</div>
           <div style="display: flex; flex-direction: column; gap: 10px;">
             <div class="icp-item">
               <div class="icp-item-label">Confirmed Technologies</div>
@@ -507,29 +416,26 @@
           </div>
         </div>
 
-        <!-- 5. Buying Committee Intelligence -->
-        <div class="icp-group" style="grid-column: span 2;">
-          <div class="icp-group-title">🎯 5. Buying Committee Intelligence</div>
+        <!-- Buying Committee -->
+        <div class="icp-group">
+          <div class="icp-section-title"><span class="icp-section-dot icp-dot-committee"></span>Buying Committee</div>
           ${committeeTitles.length ? `
-          <div style="overflow-x: auto;">
-            <table style="width: 100%; border-collapse: collapse; font-size: 0.72rem; text-align: left;">
+          <div class="icp-table-wrap">
+            <table>
               <thead>
-                <tr style="border-bottom: 1px solid var(--border);">
-                  <th style="padding: 6px 12px 6px 0; color: var(--text-dim); text-transform: uppercase;">Title</th>
-                  <th style="padding: 6px 0 6px 12px; color: var(--text-dim); text-transform: uppercase;">Buying Role</th>
-                </tr>
+                <tr><th>Title</th><th>Buying Role</th></tr>
               </thead>
               <tbody>
                 ${committeeTitles.map((t, i) => `
-                  <tr style="border-bottom: 1px solid var(--border); vertical-align: top;">
-                    <td style="padding: 8px 12px 8px 0; font-weight: 600; color: var(--text);">${escapeHtml(t)}</td>
-                    <td style="padding: 8px 0 8px 12px; font-weight: 700; color: ${influenceColor(buyingRoles[i])};">${escapeHtml(buyingRoles[i] || '—')}</td>
+                  <tr>
+                    <td style="white-space: normal; font-weight: 600; color: var(--text);">${escapeHtml(t)}</td>
+                    <td class="icp-cell-strong ${roleClass(buyingRoles[i])}">${escapeHtml(buyingRoles[i] || '—')}</td>
                   </tr>
                 `).join('')}
               </tbody>
             </table>
-          </div>` : `<span style="color:var(--text-dim); font-size:0.75rem;">No buying committee members specified</span>`}
-          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 10px;">
+          </div>` : `<span class="icp-empty">No buying committee members specified</span>`}
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 12px;">
             <div class="icp-item">
               <div class="icp-item-label">Title Variations</div>
               ${makeTags(committee.title_variations)}
@@ -539,15 +445,15 @@
               ${makeTags(_dedupeArr([...(committee.departments || []), ...(committee.seniority || [])]))}
             </div>
           </div>
-          <div class="icp-item" style="margin-top: 10px;">
+          <div class="icp-item" style="margin-top: 12px;">
             <div class="icp-item-label">Common Pain Points</div>
             ${makeList(committee.common_pain_points)}
           </div>
         </div>
 
-        <!-- 6. Company Intelligence -->
-        <div class="icp-group" style="grid-column: span 2;">
-          <div class="icp-group-title">🏢 6. Company Intelligence</div>
+        <!-- Company -->
+        <div class="icp-group">
+          <div class="icp-section-title"><span class="icp-section-dot icp-dot-company"></span>Company</div>
           <div style="display: flex; flex-direction: column; gap: 10px;">
             <div class="icp-item">
               <div class="icp-item-label">Company Type & Business Model</div>
@@ -563,9 +469,9 @@
             </div>
             <div class="icp-item">
               <div class="icp-item-label">Revenue & Ownership</div>
-              <div style="font-size: 0.75rem; color: var(--text);">
-                💰 <strong>Revenue:</strong> ${(company.revenue_min || company.revenue_max) ? `$${(company.revenue_min||0).toLocaleString()} – $${(company.revenue_max||'∞').toLocaleString ? company.revenue_max.toLocaleString() : company.revenue_max}` : 'Not specified'}<br>
-                🏛️ <strong>Ownership:</strong> ${company.ownership && company.ownership.length ? company.ownership.join(', ') : 'Any'}
+              <div style="font-size: 0.75rem; color: var(--text); line-height: 1.6;">
+                <strong>Revenue:</strong> ${(company.revenue_min || company.revenue_max) ? `$${(company.revenue_min||0).toLocaleString()} – $${(company.revenue_max||'∞').toLocaleString ? company.revenue_max.toLocaleString() : company.revenue_max}` : 'Not specified'}<br>
+                <strong>Ownership:</strong> ${company.ownership && company.ownership.length ? company.ownership.join(', ') : 'Any'}
               </div>
             </div>
             <div class="icp-item">
@@ -579,51 +485,9 @@
           </div>
         </div>
 
-        <!-- 7. Market Intelligence -->
-        <div class="icp-group">
-          <div class="icp-group-title">📈 7. Market Intelligence</div>
-          <div style="display: flex; flex-direction: column; gap: 10px;">
-            <div class="icp-item">
-              <div class="icp-item-label">Competitors</div>
-              ${makeTags(market.competitors)}
-            </div>
-            <div class="icp-item">
-              <div class="icp-item-label">Market Position</div>
-              ${makeTags(market.market_position)}
-            </div>
-            <div class="icp-item">
-              <div class="icp-item-label">Certifications & Associations</div>
-              ${makeTags(_dedupeArr([...(market.certifications || []), ...(market.industry_associations || [])]))}
-            </div>
-            <div class="icp-item">
-              <div class="icp-item-label">Compliance Requirements</div>
-              ${makeTags(market.compliance_requirements)}
-            </div>
-          </div>
-        </div>
-
-        <!-- 8. Intent Intelligence -->
-        <div class="icp-group" style="background: rgba(16, 185, 129, 0.02); border-color: rgba(16, 185, 129, 0.1);">
-          <div class="icp-group-title" style="color: var(--green-light); border-bottom-color: rgba(16, 185, 129, 0.08);">⚡ 8. Intent Intelligence</div>
-          <div style="display: flex; flex-direction: column; gap: 10px;">
-            <div class="icp-item">
-              <div class="icp-item-label">Growth & Expansion Signals</div>
-              ${makeTags(_dedupeArr([...(intent.growth_signals || []), ...(intent.expansion_signals || [])]))}
-            </div>
-            <div class="icp-item">
-              <div class="icp-item-label">Technology & Hiring Signals</div>
-              ${makeTags(_dedupeArr([...(intent.technology_signals || []), ...(intent.hiring_signals || [])]))}
-            </div>
-            <div class="icp-item">
-              <div class="icp-item-label">Financial & Executive Signals</div>
-              ${makeTags(_dedupeArr([...(intent.financial_signals || []), ...(intent.executive_change_signals || [])]))}
-            </div>
-          </div>
-        </div>
-
-        <!-- 9. Search Intelligence & Exclusions -->
+        <!-- Search Intelligence -->
         <div class="icp-group" style="grid-column: span 2;">
-          <div class="icp-group-title">🔍 9. Search Intelligence</div>
+          <div class="icp-section-title"><span class="icp-section-dot icp-dot-search"></span>Search Intelligence</div>
           <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
             <div class="icp-item">
               <div class="icp-item-label">Business Keywords</div>
@@ -644,64 +508,11 @@
           </div>
         </div>
 
-        <!-- 10. Lead Scoring Factors -->
+        <!-- Confidence detail — kept visible (not collapsed) since it's the
+             most actionable feedback for refining the next prompt. -->
         <div class="icp-group" style="grid-column: span 2;">
-          <div class="icp-group-title">📊 10. Lead Scoring Factors</div>
-          ${leadScoring.length ? `
-          <div style="overflow-x: auto;">
-            <table style="width: 100%; border-collapse: collapse; font-size: 0.72rem; text-align: left;">
-              <thead>
-                <tr style="border-bottom: 1px solid var(--border);">
-                  <th style="padding: 6px 12px 6px 0; color: var(--text-dim); text-transform: uppercase;">Factor</th>
-                  <th style="padding: 6px 12px; color: var(--text-dim); text-transform: uppercase; width: 90px;">Weight</th>
-                  <th style="padding: 6px 0 6px 12px; color: var(--text-dim); text-transform: uppercase;">Reasoning</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${leadScoring.map(f => `
-                  <tr style="border-bottom: 1px solid var(--border); vertical-align: top;">
-                    <td style="padding: 8px 12px 8px 0; font-weight: 600; color: var(--text);">${escapeHtml(f.factor || '—')}</td>
-                    <td style="padding: 8px 12px; font-weight: 700; color: ${weightColor(f.weight)};">${escapeHtml(f.weight || '—')}</td>
-                    <td style="padding: 8px 0 8px 12px; color: var(--text-muted);">${escapeHtml(f.reasoning || '—')}</td>
-                  </tr>
-                `).join('')}
-              </tbody>
-            </table>
-          </div>` : `<span style="color:var(--text-dim); font-size:0.75rem;">No scoring factors specified</span>`}
-        </div>
-
-        <!-- 11. Data Sources -->
-        <div class="icp-group">
-          <div class="icp-group-title">🗂️ 11. Data Sources</div>
-          ${makeTags(dataSources)}
-        </div>
-
-        ${aiSuggestions.length ? `
-        <!-- AI Ideas — the AI's own unverified opinion, distinct from Coverage Analysis's real-data-backed suggestions -->
-        <div class="icp-group" style="grid-column: span 2; background: rgba(139, 92, 246, 0.03); border-color: rgba(139, 92, 246, 0.15);">
-          <div class="icp-group-title" style="color: var(--violet); border-bottom-color: rgba(139, 92, 246, 0.1);">
-            ✨ AI Ideas <span style="font-weight: 500; font-size: 0.62rem; color: var(--text-dim); text-transform: none; letter-spacing: normal;">(unverified opinion — not measured against real search data)</span>
-          </div>
-          <div style="display: flex; flex-direction: column; gap: 10px;">
-            ${aiSuggestions.map(s => `
-              <div class="icp-item">
-                <div style="font-size: 0.78rem; color: var(--text); font-weight: 500;">${escapeHtml(s.suggestion || '')}</div>
-                <div style="font-size: 0.68rem; color: var(--text-dim); margin-top: 3px; line-height: 1.4;">
-                  ${s.expected_coverage_impact ? `<strong>Coverage:</strong> ${escapeHtml(s.expected_coverage_impact)} &nbsp;·&nbsp; ` : ''}${s.expected_quality_impact ? `<strong>Quality:</strong> ${escapeHtml(s.expected_quality_impact)} &nbsp;·&nbsp; ` : ''}${s.tradeoff ? `<strong>Tradeoff:</strong> ${escapeHtml(s.tradeoff)}` : ''}
-                </div>
-              </div>
-            `).join('')}
-          </div>
-        </div>` : ''}
-
-        <!-- 12. Confidence & Clarifying Questions -->
-        <div class="icp-group" style="background: rgba(251, 191, 36, 0.02); border-color: rgba(251, 191, 36, 0.1);">
-          <div class="icp-group-title" style="color: var(--amber-light); border-bottom-color: rgba(251, 191, 36, 0.08);">💡 12. Confidence</div>
-          <div style="display: flex; flex-direction: column; gap: 10px;">
-            <div class="icp-item">
-              <div class="icp-item-label">Score</div>
-              <div style="font-size: 0.9rem; font-weight: 700; color: var(--amber-light);">${confidence.score != null ? confidence.score : '—'} / 100</div>
-            </div>
+          <div class="icp-section-title"><span class="icp-section-dot" style="background: var(--amber-light);"></span>Confidence & Next Steps</div>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
             <div class="icp-item">
               <div class="icp-item-label">Reasoning</div>
               <div style="font-size: 0.75rem; color: var(--text);">${escapeHtml(confidence.reasoning || 'Not specified')}</div>
@@ -710,11 +521,106 @@
               <div class="icp-item-label">Missing Information</div>
               ${makeList(confidence.missing_info)}
             </div>
+            <div class="icp-item" style="grid-column: span 2;">
+              <div class="icp-item-label">Clarifying Questions</div>
+              ${makeList(confidence.clarifying_questions)}
+            </div>
           </div>
         </div>
-        <div class="icp-group" style="background: rgba(16, 185, 129, 0.02); border-color: rgba(16, 185, 129, 0.1);">
-          <div class="icp-group-title" style="color: var(--green-light); border-bottom-color: rgba(16, 185, 129, 0.08);">❓ Clarifying Questions</div>
-          ${makeList(confidence.clarifying_questions)}
+
+        <!-- More Intelligence — supplementary/explanatory modules, collapsed by default -->
+        <div class="icp-more-title">More Intelligence</div>
+        <div class="icp-more-group">
+          <div class="strategy-module" data-module="icp-market">
+            <div class="strategy-module-header" onclick="toggleStrategyModule(this)">
+              <span class="strategy-module-icon">📈</span> Market Intelligence
+              <span class="strategy-module-chevron">▾</span>
+            </div>
+            <div class="strategy-module-body">
+              <div class="icp-item">
+                <div class="icp-item-label">Competitors</div>
+                ${makeTags(market.competitors)}
+              </div>
+              <div class="icp-item">
+                <div class="icp-item-label">Market Position</div>
+                ${makeTags(market.market_position)}
+              </div>
+              <div class="icp-item">
+                <div class="icp-item-label">Certifications & Associations</div>
+                ${makeTags(_dedupeArr([...(market.certifications || []), ...(market.industry_associations || [])]))}
+              </div>
+              <div class="icp-item">
+                <div class="icp-item-label">Compliance Requirements</div>
+                ${makeTags(market.compliance_requirements)}
+              </div>
+            </div>
+          </div>
+
+          <div class="strategy-module" data-module="icp-intent">
+            <div class="strategy-module-header" onclick="toggleStrategyModule(this)">
+              <span class="strategy-module-icon">⚡</span> Intent Signals
+              <span class="strategy-module-chevron">▾</span>
+            </div>
+            <div class="strategy-module-body">
+              <div class="icp-item">
+                <div class="icp-item-label">Growth & Expansion Signals</div>
+                ${makeTags(_dedupeArr([...(intent.growth_signals || []), ...(intent.expansion_signals || [])]))}
+              </div>
+              <div class="icp-item">
+                <div class="icp-item-label">Technology & Hiring Signals</div>
+                ${makeTags(_dedupeArr([...(intent.technology_signals || []), ...(intent.hiring_signals || [])]))}
+              </div>
+              <div class="icp-item">
+                <div class="icp-item-label">Financial & Executive Signals</div>
+                ${makeTags(_dedupeArr([...(intent.financial_signals || []), ...(intent.executive_change_signals || [])]))}
+              </div>
+            </div>
+          </div>
+
+          <div class="strategy-module" data-module="icp-scoring">
+            <div class="strategy-module-header" onclick="toggleStrategyModule(this)">
+              <span class="strategy-module-icon">📊</span> Lead Scoring Factors
+              <span class="strategy-module-chevron">▾</span>
+            </div>
+            <div class="strategy-module-body">
+              ${leadScoring.length ? `
+              <div class="icp-table-wrap">
+                <table>
+                  <thead>
+                    <tr><th>Factor</th><th style="width: 90px;">Weight</th><th>Reasoning</th></tr>
+                  </thead>
+                  <tbody>
+                    ${leadScoring.map(f => `
+                      <tr>
+                        <td style="white-space: normal; font-weight: 600; color: var(--text);">${escapeHtml(f.factor || '—')}</td>
+                        <td class="icp-cell-strong ${weightClass(f.weight)}">${escapeHtml(f.weight || '—')}</td>
+                        <td style="white-space: normal; color: var(--text-muted);">${escapeHtml(f.reasoning || '—')}</td>
+                      </tr>
+                    `).join('')}
+                  </tbody>
+                </table>
+              </div>` : `<span class="icp-empty">No scoring factors specified</span>`}
+            </div>
+          </div>
+
+          ${aiSuggestions.length ? `
+          <div class="strategy-module" data-module="icp-ai-ideas">
+            <div class="strategy-module-header" onclick="toggleStrategyModule(this)">
+              <span class="strategy-module-icon">✨</span> AI Ideas
+              <span style="font-weight: 500; font-size: 0.62rem; color: var(--text-dim); text-transform: none; letter-spacing: normal; margin-left: 2px;">unverified opinion</span>
+              <span class="strategy-module-chevron">▾</span>
+            </div>
+            <div class="strategy-module-body">
+              ${aiSuggestions.map(s => `
+                <div class="icp-item">
+                  <div style="font-size: 0.78rem; color: var(--text); font-weight: 500;">${escapeHtml(s.suggestion || '')}</div>
+                  <div style="font-size: 0.68rem; color: var(--text-dim); margin-top: 3px; line-height: 1.4;">
+                    ${s.expected_coverage_impact ? `<strong>Coverage:</strong> ${escapeHtml(s.expected_coverage_impact)} &nbsp;·&nbsp; ` : ''}${s.expected_quality_impact ? `<strong>Quality:</strong> ${escapeHtml(s.expected_quality_impact)} &nbsp;·&nbsp; ` : ''}${s.tradeoff ? `<strong>Tradeoff:</strong> ${escapeHtml(s.tradeoff)}` : ''}
+                  </div>
+                </div>
+              `).join('')}
+            </div>
+          </div>` : ''}
         </div>
       `;
 
@@ -733,6 +639,11 @@
         const combinedQuery = [titleQuery, industryQuery, keywordQuery].filter(Boolean).join(' AND ');
 
         searchPanel.innerHTML = `
+          <!-- AI Search Plan (Stage 2) — filled in separately by renderSearchPlan()
+               once that stage's SSE event arrives, right after this ICP-triggered
+               reset so a stale prior run's plan never lingers on screen. -->
+          <div id="searchPlanSection"></div>
+
           <!-- Target Search Filters Board -->
           <div class="apollo-filters-container">
             <div class="apollo-filters-header">
@@ -853,7 +764,7 @@
                   <div style="display: flex; flex-direction: column; gap: 4px;">
                     <div class="apollo-filter-title" style="font-size: 0.9rem; font-weight: 700;">⌨️ Copy-Paste Search Queries (Boolean)</div>
                     <span style="font-size: 0.72rem; color: var(--text-dim); line-height: 1.4;">
-                      Use these pre-formatted search strings to quickly filter leads on LinkedIn Sales Navigator, Apollo, or other databases.
+                      Use these pre-formatted search strings to quickly filter leads on LinkedIn Sales Navigator or other databases.
                     </span>
                   </div>
                 </div>
@@ -935,6 +846,106 @@
       document.getElementById('icpPlaceholder').style.display = 'none';
       card.style.display = 'block';
       switchTab('tab-search');
+
+      // Every ICP-producing path (chat, website, manual, history reload,
+      // the ICP-tab's custom-run card) funnels through this one function —
+      // hooking the wizard's Section 2 unlock here, rather than in each
+      // caller, means it can never drift out of sync with one of them.
+      if (typeof onICPReady === 'function') onICPReady();
+    }
+
+    // ── Search Plan Panel (Stage 2) ──────────────────────────────────────────
+    // Renders pipeline/search_planner.py's real output for this run — what
+    // Stage 2 actually resolved against the actor's fixed industry enum and
+    // sent as company_keywords, not a client-side approximation like the
+    // Apollo-style board below it. Reuses that board's exact CSS classes
+    // (.apollo-filter-card, .tag, .icp-table-wrap) so the two sit together
+    // as one visual system instead of introducing new styling.
+    function renderSearchPlan(plan) {
+      const section = document.getElementById('searchPlanSection');
+      if (!section || !plan) return;
+
+      const industries = Array.isArray(plan.industry_candidates) ? plan.industry_candidates : [];
+      const industryRows = industries.map(c => `
+        <tr>
+          <td style="white-space: normal; font-weight: 600; color: var(--text);">${escapeHtml(c.value || '')}</td>
+          <td class="icp-cell-strong" style="color: var(--amber);">${c.confidence != null ? Math.round(c.confidence) : '—'}%</td>
+        </tr>
+      `).join('');
+
+      const posTag = (label) => `<span class="tag" style="background: rgba(16, 185, 129, 0.08); border-color: rgba(16, 185, 129, 0.15); color: var(--green-light);">${escapeHtml(label)}</span>`;
+      const negTag = (label) => `<span class="tag" style="background: rgba(239, 68, 68, 0.08); border-color: rgba(239, 68, 68, 0.15); color: var(--red);">${escapeHtml(label)}</span>`;
+      const typeTag = (label) => `<span class="tag" style="background: rgba(99, 102, 241, 0.08); border-color: rgba(99, 102, 241, 0.15); color: var(--purple-light);">${escapeHtml(label)}</span>`;
+
+      const highPriority = Array.isArray(plan.high_priority_keywords) ? plan.high_priority_keywords : [];
+      const secondary = Array.isArray(plan.secondary_keywords) ? plan.secondary_keywords : [];
+      const negative = Array.isArray(plan.negative_keywords) ? plan.negative_keywords : [];
+      const companyTypes = Array.isArray(plan.company_type_terms) ? plan.company_type_terms : [];
+
+      section.innerHTML = `
+        <div class="apollo-filters-container" style="margin-bottom: 16px;">
+          <div class="apollo-filters-header">
+            <h3 style="display: flex; align-items: center; gap: 8px;">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--violet)" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><polyline points="12 16 16 12 12 8"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+              🧭 AI Search Plan
+            </h3>
+            <span style="font-size: 0.72rem; color: var(--text-dim);">What Stage 2 actually resolved against the actor's fixed schema and used for this run — not a manual reference board.</span>
+          </div>
+          <div class="apollo-filters-grid">
+            <div class="apollo-filter-card">
+              <div class="apollo-filter-card-header">
+                <div class="apollo-filter-title">🏷️ Resolved Industry (ranked)</div>
+              </div>
+              ${industryRows ? `
+                <div class="icp-table-wrap">
+                  <table><thead><tr><th>Value</th><th>Confidence</th></tr></thead><tbody>${industryRows}</tbody></table>
+                </div>` : `<span class="icp-empty">No confident match in the actor's enum — industry filter omitted this run</span>`}
+            </div>
+            <div class="apollo-filter-card">
+              <div class="apollo-filter-card-header">
+                <div class="apollo-filter-title">🏢 Company Type</div>
+              </div>
+              <div class="apollo-filter-value" style="display: flex; gap: 4px; flex-wrap: wrap;">
+                ${companyTypes.length ? companyTypes.map(typeTag).join('') : 'None'}
+              </div>
+            </div>
+            <div class="apollo-filter-card" style="grid-column: span 2;">
+              <div class="apollo-filter-card-header">
+                <div class="apollo-filter-title">🎯 High-Priority Keywords</div>
+                <button class="apollo-btn-copy" id="btn-copy-plan-hp" onclick="copyToClipboard('${jsStringAttr(highPriority.join(', '))}', 'btn-copy-plan-hp')">Copy</button>
+              </div>
+              <div class="apollo-filter-value" style="display: flex; gap: 4px; flex-wrap: wrap;">
+                ${highPriority.length ? highPriority.map(posTag).join('') : 'None'}
+              </div>
+            </div>
+            <div class="apollo-filter-card" style="grid-column: span 2;">
+              <div class="apollo-filter-card-header">
+                <div class="apollo-filter-title">🔎 Secondary Keywords <span style="font-weight:400; color: var(--text-dim); font-size: 0.65rem;">(fallback only)</span></div>
+              </div>
+              <div class="apollo-filter-value" style="display: flex; gap: 4px; flex-wrap: wrap;">
+                ${secondary.length ? secondary.map(t => `<span class="tag" style="opacity: 0.75;">${escapeHtml(t)}</span>`).join('') : 'None'}
+              </div>
+            </div>
+            <div class="apollo-filter-card" style="grid-column: span 2;">
+              <div class="apollo-filter-card-header">
+                <div class="apollo-filter-title">✖ Negative Keywords <span style="font-weight:400; color: var(--text-dim); font-size: 0.65rem;">(filtered from results after the fact — never sent to the actor)</span></div>
+              </div>
+              <div class="apollo-filter-value" style="display: flex; gap: 4px; flex-wrap: wrap;">
+                ${negative.length ? negative.map(negTag).join('') : 'None'}
+              </div>
+            </div>
+            <div class="apollo-filter-card" style="grid-column: span 2;">
+              <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 12px;">
+                <div style="font-size: 0.75rem; color: var(--text); line-height: 1.5; flex: 1;">${escapeHtml(plan.reasoning || 'No reasoning provided.')}</div>
+                <div style="text-align:center; flex-shrink: 0;">
+                  <div style="font-size: 1.3rem; font-weight: 800; color: var(--violet);">${plan.confidence != null ? Math.round(plan.confidence) : '—'}<span style="font-size:0.7rem; color: var(--text-dim);">/100</span></div>
+                  <div style="font-size: 0.62rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.03em;">Plan Confidence</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
     }
 
     function _dedupeArr(arr) {

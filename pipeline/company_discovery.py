@@ -124,10 +124,15 @@ def _cache_company_validation(cache_key: str, verdict: dict) -> None:
         pl.log.warning("Company validation cache write failed for %s: %s", cache_key, e)
 
 
-def _company_discovery_cache_key(icp: dict, methods: tuple) -> str:
+def _company_discovery_cache_key(icp: dict, methods: tuple, search_plan: Optional[dict] = None) -> str:
     """Deterministic composite string (not hashed) — same convention as
     pl._coverage_cache_key() below — built from every firmographic dimension
-    that actually changes what gets discovered."""
+    that actually changes what gets discovered.
+
+    search_plan is folded in too: when supplied, it changes the actual
+    queries _discover_companies_via_web_search() sends (see below), so a
+    materially different plan for the same ICP firmographics must not
+    silently reuse a stale cached discovery."""
     industry = pl._bi_industry(icp)
     company = pl._bi_company(icp)
     industry_terms = "|".join(sorted(pl._dedupe_list(
@@ -137,16 +142,21 @@ def _company_discovery_cache_key(icp: dict, methods: tuple) -> str:
     size_min, size_max = pl._bi_size_range(icp)
     company_type = "|".join(sorted(pl._safe_list(company.get("company_type"))))
     exclusions = "|".join(sorted(pl._bi_negative_keywords(icp)))
-    return f"{industry_terms}::{locations}::{size_min}-{size_max}::{company_type}::{exclusions}::{'|'.join(sorted(methods))}"
+    plan_signature = ""
+    if search_plan:
+        plan_signature = "|".join(sorted(pl._dedupe_list(
+            [c.get("value", "") for c in search_plan.get("industry_candidates", [])]
+            + list(search_plan.get("high_priority_keywords", []))
+        )))
+    return f"{industry_terms}::{locations}::{size_min}-{size_max}::{company_type}::{exclusions}::{'|'.join(sorted(methods))}::{plan_signature}"
 
 
 def _dedupe_companies(companies: list[dict]) -> list[dict]:
     """Order-preserving dedupe: primary key is pl.normalize_domain() when a
     company has one; falls back to a >=92 fuzzy-name match (pl._fuzzy_ratio)
     against already-kept companies when it doesn't. Merges source_methods
-    on a collision so downstream logic can see "found by both the Apollo
-    preview and web search" as a mild extra-confidence signal, and backfills
-    a domain onto a name-only entry if a later duplicate happens to have one."""
+    on a collision, and backfills a domain onto a name-only entry if a later
+    duplicate happens to have one."""
     kept: list[dict] = []
     domain_index: dict = {}
 
@@ -178,130 +188,10 @@ def _dedupe_companies(companies: list[dict]) -> list[dict]:
     return kept
 
 
-def _discover_companies_via_apollo_company_search(icp: dict, target_companies: int) -> tuple:
-    """Forward-compat slot for Apollo's real company-search endpoint
-    (mixed_companies/search) — live-tested during design and confirmed the
-    endpoint exists and is reachable, but currently returns 422
-    "insufficient credits" on this account's plan. Never raises: on any
-    credit/plan error (402/403/422), logs once and returns ([], False) so
-    discover_companies() falls back to the other two methods. The moment
-    the account's plan changes, this starts returning real matches with
-    zero code changes needed — though the exact payload shape for a
-    *successful* call is unverified beyond the endpoint path/failure mode
-    (can't be tested further without paid credits), so it may need
-    adjustment once actually reachable."""
-    if not pl.APOLLO_API_KEY:
-        return [], False
-
-    headers = {"Content-Type": "application/json", "X-Api-Key": pl.APOLLO_API_KEY}
-    size_min, size_max = pl._bi_size_range(icp)
-    exclusions = pl._bi_negative_keywords(icp)
-
-    payload = {
-        "page": 1,
-        "per_page": min(target_companies, 100),
-        "organization_num_employees_ranges": pl._build_apollo_size_range(size_min, size_max),
-        "organization_locations": pl._clean_apollo_locations(pl._bi_all_locations(icp)),
-        "q_organization_keyword_tags": pl._build_apollo_keyword_tags(icp),
-    }
-    if exclusions:
-        payload["q_organization_not_search_list"] = exclusions
-    payload = {k: v for k, v in payload.items() if v not in [[], None, ""]}
-
-    try:
-        resp = requests.post(
-            "https://api.apollo.io/api/v1/mixed_companies/search",
-            json=payload, headers=headers, timeout=30,
-        )
-        if resp.status_code in (402, 403, 422):
-            pl.log.info(
-                "Apollo company search unavailable on current plan (HTTP %d) — using fallback discovery methods.",
-                resp.status_code,
-            )
-            return [], False
-        resp.raise_for_status()
-        data = resp.json()
-    except requests.exceptions.RequestException as e:
-        pl.log.warning("Apollo company search failed: %s", e)
-        return [], False
-
-    orgs = data.get("organizations") or data.get("accounts") or []
-    companies = [
-        {
-            "name": org.get("name"),
-            "domain": pl.normalize_domain(org.get("primary_domain") or org.get("website_url") or "") or None,
-            "source_methods": ["apollo_company_search"],
-            "raw": org,
-        }
-        for org in orgs if org.get("name")
-    ]
-    return companies, True
-
-
-def _discover_companies_via_apollo_people_preview(icp: dict, target_companies: int) -> list[dict]:
-    """Free method — reuses pl._apollo_search_probe()'s exact payload-building
-    below (the same zero-paid-credit api_search call Coverage Analysis
-    already relies on) but with person_titles omitted, so results surface
-    companies rather than specific people. Live-tested during design: the
-    preview's organization object reliably includes a real, unmasked
-    company name (only person-level fields like the last name are
-    obfuscated) but never a domain/website field — that only appears after
-    per-person paid enrichment. So this method's output is name-only;
-    Company Validation Tier B is what backfills a domain when possible."""
-    if not pl.APOLLO_API_KEY:
-        return []
-
-    headers = {"Content-Type": "application/json", "X-Api-Key": pl.APOLLO_API_KEY}
-    size_min, size_max = pl._bi_size_range(icp)
-    exclusions = pl._bi_negative_keywords(icp)
-    keyword_tags = pl._build_apollo_keyword_tags(icp)
-
-    companies: list[dict] = []
-    seen_names = set()
-    pages = min(math.ceil(target_companies / 100), 3)   # per_page=100 is the live-tested ceiling (pl._apollo_search_probe)
-
-    for page in range(1, pages + 1):
-        payload = {
-            "page": page,
-            "per_page": 100,
-            "organization_num_employees_ranges": pl._build_apollo_size_range(size_min, size_max),
-            "person_locations": pl._clean_apollo_locations(pl._bi_all_locations(icp)),
-            "q_organization_keyword_tags": keyword_tags,
-        }
-        if exclusions:
-            payload["q_organization_not_search_list"] = exclusions
-        payload = {k: v for k, v in payload.items() if v not in [[], None, ""]}
-
-        try:
-            resp = requests.post(
-                "https://api.apollo.io/api/v1/mixed_people/api_search",
-                json=payload, headers=headers, timeout=30,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        except requests.exceptions.RequestException as e:
-            pl.log.warning("Apollo company-discovery preview failed on page %d: %s", page, e)
-            break
-
-        people = data.get("people", []) or data.get("contacts", [])
-        if not people:
-            break
-        for p in people:
-            name = (p.get("organization") or {}).get("name")
-            if name and name not in seen_names:
-                seen_names.add(name)
-                companies.append({"name": name, "domain": None, "source_methods": ["apollo_people_preview"], "raw": {}})
-        if len(companies) >= target_companies:
-            break
-
-    return companies[:target_companies]
-
-
 def _extract_companies_with_gemini(search_results: dict) -> list[dict]:
     """Given {query: [snippet dicts]} from _discover_companies_via_web_search(),
-    asks Gemini to extract a candidate company list — same calling pattern
-    as pl.parse_search_results_with_gemini(), same "guess the domain from
-    context" instruction."""
+    asks Gemini to extract a candidate company list, with a "guess the
+    domain from context" instruction."""
     if not pl.GEMINI_API_KEY:
         return []
 
@@ -340,23 +230,37 @@ Search results:
         return []
 
 
-def _discover_companies_via_web_search(icp: dict) -> list[dict]:
+def _discover_companies_via_web_search(icp: dict, search_plan: Optional[dict] = None) -> list[dict]:
     """Reuses the exact Apify google-search-scraper + Gemini pattern already
     built for Stage 10 (originally 8) claim verification
     (pl._run_apify_claim_search / pl.verify_company_claims_with_gemini), but
     querying for companies matching the ICP's firmographics instead of
-    verifying a claim about one already-known company."""
+    verifying a claim about one already-known company.
+
+    search_plan (pipeline/search_planner.py's Stage 2 output) — when
+    supplied, its curated high_priority_keywords + company_type_terms
+    replace the raw primary_industry/company_type/product_keywords mix
+    below as the query source, for the same reason it helps the Apify
+    leads-finder mapping: specific compound concepts recall better than a
+    generic industry/product-keyword blend. None preserves the previous
+    query-building behavior exactly."""
     api_token = os.getenv("APIFY_API_TOKEN")
     if not api_token:
         return []
 
     industry = pl._bi_industry(icp)
     company = pl._bi_company(icp)
-    search_terms = pl._dedupe_list(
-        pl._safe_list(industry.get("primary_industry"))
-        + pl._safe_list(company.get("company_type"))
-        + pl._safe_list(pl._bi_search(icp).get("product_keywords"))
-    )[:_COMPANY_DISCOVERY_MAX_QUERIES]
+    if search_plan and (search_plan.get("high_priority_keywords") or search_plan.get("company_type_terms")):
+        search_terms = pl._dedupe_list(
+            list(search_plan.get("high_priority_keywords") or [])
+            + list(search_plan.get("company_type_terms") or [])
+        )[:_COMPANY_DISCOVERY_MAX_QUERIES]
+    else:
+        search_terms = pl._dedupe_list(
+            pl._safe_list(industry.get("primary_industry"))
+            + pl._safe_list(company.get("company_type"))
+            + pl._safe_list(pl._bi_search(icp).get("product_keywords"))
+        )[:_COMPANY_DISCOVERY_MAX_QUERIES]
     locations = pl._bi_all_locations(icp)[:2]
 
     if not search_terms:
@@ -425,22 +329,20 @@ def discover_companies(
     icp: dict,
     target_companies: Optional[int] = None,
     target: int = 25,
-    enable_apollo_preview: bool = True,
     enable_web_search: bool = True,
+    search_plan: Optional[dict] = None,
 ) -> dict:
     """
-    Stage 2 — finds candidate companies matching the ICP's firmographics
-    (industry, size, location, company type), combining every viable
-    discovery method:
-      1. The real Apollo company-search endpoint, if the account's plan
-         supports it (auto-detected, gracefully skipped otherwise).
-      2. A free Apollo people-search preview with titles omitted.
-      3. A Gemini + web-search fallback.
-    Results from whichever methods actually ran are merged and deduped.
-    Cached 7 days per unique ICP firmographic signature.
+    Stage 3 — finds candidate companies matching the ICP's firmographics
+    (industry, size, location, company type) via a Gemini + web-search
+    method. Cached 7 days per unique ICP firmographic signature.
+
+    search_plan: Stage 2's output (pipeline/search_planner.py) — passed
+    through to _discover_companies_via_web_search(); None preserves the
+    previous query-building behavior exactly.
 
     Returns {"companies": [{"name", "domain", "source_methods", "raw"}, ...],
-    "counts": {...}, "apollo_company_search_available": bool}.
+    "counts": {...}}.
     """
     if target_companies is None:
         target_companies = max(
@@ -448,37 +350,29 @@ def discover_companies(
             _MIN_COMPANY_DISCOVERY_FLOOR,
         )
 
-    methods = ["apollo_company_search"]
-    if enable_apollo_preview:
-        methods.append("apollo_people_preview")
+    methods = []
     if enable_web_search:
         methods.append("web_search")
-    cache_key = _company_discovery_cache_key(icp, tuple(methods))
+    cache_key = _company_discovery_cache_key(icp, tuple(methods), search_plan)
 
     cached = _get_cached_company_discovery(cache_key)
     if cached is not None:
-        pl.log.info("Stage 2 — Company Discovery: using cached results (%d companies).", len(cached.get("companies", [])))
+        pl.log.info("Stage 3 — Company Discovery: using cached results (%d companies).", len(cached.get("companies", [])))
         return cached
 
-    pl.log.info("Stage 2 — Company Discovery: searching for ~%d candidate companies …", target_companies)
+    pl.log.info("Stage 3 — Company Discovery: searching for ~%d candidate companies …", target_companies)
 
-    company_search_results, apollo_available = _discover_companies_via_apollo_company_search(icp, target_companies)
-    preview_results = _discover_companies_via_apollo_people_preview(icp, target_companies) if enable_apollo_preview else []
-    web_results = _discover_companies_via_web_search(icp) if enable_web_search else []
+    web_results = _discover_companies_via_web_search(icp, search_plan) if enable_web_search else []
 
-    counts = {
-        "apollo_company_search": len(company_search_results),
-        "apollo_people_preview": len(preview_results),
-        "web_search": len(web_results),
-    }
-    merged = _dedupe_companies(company_search_results + preview_results + web_results)
+    counts = {"web_search": len(web_results)}
+    merged = _dedupe_companies(web_results)
 
-    result = {"companies": merged, "counts": counts, "apollo_company_search_available": apollo_available}
+    result = {"companies": merged, "counts": counts}
     _cache_company_discovery(cache_key, result)
 
     pl.log.info(
-        "Stage 2 — Company Discovery: %d unique companies found (apollo_search=%d, apollo_preview=%d, web_search=%d).",
-        len(merged), counts["apollo_company_search"], counts["apollo_people_preview"], counts["web_search"],
+        "Stage 3 — Company Discovery: %d unique companies found (web_search=%d).",
+        len(merged), counts["web_search"],
     )
     return result
 
@@ -659,7 +553,7 @@ def validate_companies(
     profile: Optional[str] = None,
 ) -> dict:
     """
-    Stage 3 — two-tier validation. Tier A (free, every candidate): domain
+    Stage 4 — two-tier validation. Tier A (free, every candidate): domain
     well-formed + not on the ICP's exclusion list. Tier B (paid, capped):
     an AI fact-check via web search, run only on Tier A survivors, ranked
     by ICP fit and capped so cost stays a single bounded Apify+Gemini call
@@ -769,7 +663,7 @@ def validate_companies(
     }
 
     pl.log.info(
-        "Stage 3 — Company Validation: %d validated (%d rule-only, %d ai-confirmed, %d ai-unclear), %d rejected.",
+        "Stage 4 — Company Validation: %d validated (%d rule-only, %d ai-confirmed, %d ai-unclear), %d rejected.",
         len(validated), counts["rule_only"], ai_confirmed, ai_unclear, len(rejected),
     )
 
@@ -781,13 +675,8 @@ def _filter_leads_by_validated_companies(
 ) -> list[dict]:
     """Post-filter applied by pl._call_source() when running company-first —
     keeps a lead only if its company matches a validated company, by domain
-    when available (Apollo/Apify already set company_domain on every lead)
-    or by fuzzy name match otherwise (Explorium leads never carry
-    company_domain at all — confirmed, no such field is ever set in its
-    mapper). This is a real precision/recall tradeoff for Explorium
-    specifically: name-only matching can both miss real matches (legal name
-    vs. DBA) and let unrelated same-named companies through. Lower-urgency
-    since enable_explorium defaults off."""
+    when available (Apify already sets company_domain on every lead) or by
+    fuzzy name match otherwise."""
     if not validated_companies:
         return leads
 
@@ -811,36 +700,26 @@ def discover_and_validate_companies(
     target: int = 25,
     profile: Optional[str] = None,
     max_ai_validate_companies: Optional[int] = None,
+    search_plan: Optional[dict] = None,
 ) -> dict:
     """
-    Thin composition wrapper: Company Discovery (Stage 2) then Company
-    Validation (Stage 3). Single call site from app.py so the Flask
+    Thin composition wrapper: Company Discovery (Stage 3) then Company
+    Validation (Stage 4). Single call site from app.py so the Flask
     orchestration layer doesn't need to manage intermediate state between
     the two stages itself. Returns {"discovery": {...}, "validation": {...}}
     — app.py reads validation["validated"] to pass into pl.run_lead_sources()
     as validated_companies for company-scoped People Discovery.
+
+    search_plan: Stage 2's output (pipeline/search_planner.py) — passed
+    through to discover_companies(); None preserves prior behavior exactly.
     """
     # See the matching comment in validate_companies() above — same
     # import-time-evaluation hazard, same fix.
     profile = profile or pl._DEFAULT_PROFILE
-    discovery = discover_companies(icp, target=target)
+    discovery = discover_companies(icp, target=target, search_plan=search_plan)
     validation = validate_companies(
         discovery["companies"], icp,
         max_ai_validate=max_ai_validate_companies, profile=profile,
     )
     return {"discovery": discovery, "validation": validation}
-
-
-# ─────────────────────────────────────────────
-# Coverage Analysis — pre-run reach estimation
-# ─────────────────────────────────────────────
-# Answers "how many companies/people would this ICP likely match?" before a
-# user commits to a real (paid-enrichment) run. Apollo-only: live-tested
-# during design and confirmed api_search costs zero paid credits (only a
-# separate, generous rate limit — 50/min, 200/hour) even on an account whose
-# enrichment credits are fully exhausted, and its free preview already
-# includes real total_entries plus real (unmasked) organization names. Apify
-# has no equivalent free pre-count tier and Explorium is unconfirmed, so
-# this never claims a number for either — see pl.estimate_coverage()'s
-# "available" flag.
 

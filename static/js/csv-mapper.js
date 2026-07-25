@@ -29,8 +29,12 @@
       const fileInput = document.getElementById('csvMapperFile');
       const nameDiv = document.getElementById('csvMapperFileName');
       const btn = document.getElementById('btnAnalyzeCsvMapping');
-      if (fileInput.files.length > 0) {
+      const n = fileInput.files.length;
+      if (n === 1) {
         nameDiv.textContent = fileInput.files[0].name;
+        btn.disabled = false;
+      } else if (n > 1) {
+        nameDiv.textContent = `${n} files selected: ${Array.from(fileInput.files).map(f => f.name).join(', ')}`;
         btn.disabled = false;
       } else {
         nameDiv.textContent = '';
@@ -57,7 +61,7 @@
 
       try {
         const formData = new FormData();
-        formData.append('file', fileInput.files[0]);
+        Array.from(fileInput.files).forEach(f => formData.append('file', f));
         const res = await fetch('/api/csv-mapper/analyze', { method: 'POST', body: formData });
         const data = await res.json();
         if (data.error) throw new Error(data.error);
@@ -77,10 +81,11 @@
     }
 
     function renderCsvMapperResults(data) {
-      const { headers, rows, mapping, ai_used_for, canonical_fields } = data;
+      const { headers, rows, mapping, ai_used_for, canonical_fields, source_files } = data;
 
       const mappedCount = headers.filter(h => mapping[h]).length;
       document.getElementById('csvMapperSummary').textContent =
+        (source_files && source_files.length > 1 ? `${source_files.length} files merged. ` : '') +
         `${mappedCount} of ${headers.length} columns mapped automatically` +
         (ai_used_for.length ? ` (${ai_used_for.length} via AI — please double-check those)` : '') +
         `. ${rows.length} rows detected.`;
@@ -107,7 +112,9 @@
         `<tr><td class="csvmap-row-num">${i + 1}</td>${headers.map(h => `<td>${escapeHtml(String(row[h] || ''))}</td>`).join('')}</tr>`
       ).join('');
 
-      document.getElementById('csvMapperResults').style.display = 'block';
+      const resultsEl = document.getElementById('csvMapperResults');
+      resultsEl.style.display = 'block';
+      resultsEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
 
     // ── CSV Mapper — saved downloads (server-persisted normalized CSVs) ─────
@@ -629,7 +636,9 @@
       document.getElementById('csvMapperImportReport').textContent =
         `Import report — ${report.imported} to import, ${report.skipped_duplicates} duplicates skipped, ${report.failed} with validation issues.`;
 
-      document.getElementById('csvMapperProcessedResults').style.display = 'block';
+      const processedEl = document.getElementById('csvMapperProcessedResults');
+      processedEl.style.display = 'block';
+      processedEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
 
     function downloadNormalizedCsv() {

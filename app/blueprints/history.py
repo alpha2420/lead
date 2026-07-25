@@ -31,14 +31,19 @@ def list_history():
                 size_bytes = os.path.getsize(filepath)
                 lead_count = 0
 
+                verified_pct = None
                 if os.path.exists(meta_path):
                     try:
                         with open(meta_path, "r", encoding="utf-8") as f:
                             meta = json.load(f)
                             inquiry = meta.get("inquiry", "Historical Scraped Run")
-                            lead_count = meta.get("stats", {}).get("sample", 0)
+                            run_stats = meta.get("stats", {}) or {}
+                            lead_count = run_stats.get("sample", 0)
                             if meta.get("timestamp"):
                                 timestamp = meta.get("timestamp")
+                            raw = run_stats.get("raw", 0) or 0
+                            if raw:
+                                verified_pct = round(run_stats.get("verified", 0) / raw * 100, 1)
                     except Exception:
                         pass
                 else:
@@ -53,10 +58,95 @@ def list_history():
                     "timestamp": timestamp or "Unknown",
                     "inquiry": inquiry,
                     "size": f"{size_bytes / 1024:.1f} KB",
-                    "leads": lead_count if lead_count >= 0 else 0
+                    "leads": lead_count if lead_count >= 0 else 0,
+                    "verified_pct": verified_pct,
                 })
     files.sort(key=lambda x: x["timestamp"], reverse=True)
     return jsonify(files)
+
+
+@bp.route("/history/aggregate")
+def aggregate_stats():
+    """All-time totals across every completed run, for the dashboard Home
+    page. Reads output/metadata_*.json directly (the durable per-run
+    record save_run_metadata() writes) rather than the in-memory
+    RunRegistry (GET /api/runs) — that registry is wiped on every server
+    restart, so a "recent activity" or "all-time totals" view built on it
+    would go blank right after a restart, exactly when a user is most
+    likely to want their history. Degrades gracefully: an empty output/
+    directory returns all-zero totals rather than erroring, and runtime
+    averaging only counts runs that actually have runtime_seconds (a
+    field added after this endpoint — older metadata predates it)."""
+    total_leads = total_verified = total_deduped = 0
+    total_invalid = total_catchall = 0
+    runtime_sum = 0.0
+    runtime_count = 0
+    run_count = 0
+    disk_bytes = 0
+    runs = []
+    latest_timestamp = ""
+    latest_sample = []
+
+    if os.path.exists("output"):
+        for name in os.listdir("output"):
+            if not (name.startswith("metadata_") and name.endswith(".json")):
+                continue
+            meta_path = os.path.join("output", name)
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+            except Exception:
+                continue
+
+            stats = meta.get("stats", {}) or {}
+            raw = stats.get("raw", 0) or 0
+            verified = stats.get("verified", 0) or 0
+
+            run_count += 1
+            total_leads += raw
+            total_verified += verified
+            total_deduped += stats.get("deduped", 0) or 0
+            total_invalid += stats.get("invalid", 0) or 0
+            total_catchall += stats.get("catchall", 0) or 0
+            disk_bytes += os.path.getsize(meta_path)
+
+            runtime = stats.get("runtime_seconds")
+            if isinstance(runtime, (int, float)):
+                runtime_sum += runtime
+                runtime_count += 1
+
+            timestamp = meta.get("timestamp", "Unknown")
+            runs.append({
+                "filename": meta.get("csv_filename", ""),
+                "inquiry": meta.get("inquiry", "Historical Scraped Run"),
+                "timestamp": timestamp,
+                "leads": stats.get("sample", 0) or 0,
+                "verified_pct": round(verified / raw * 100, 1) if raw else 0.0,
+            })
+
+            if timestamp > latest_timestamp:
+                latest_timestamp = timestamp
+                latest_sample = meta.get("sample", []) or []
+
+    runs.sort(key=lambda r: r["timestamp"], reverse=True)
+
+    return jsonify({
+        "run_count": run_count,
+        "total_leads": total_leads,
+        "total_verified": total_verified,
+        "total_duplicates": max(total_leads - total_deduped, 0),
+        "success_rate": round(total_verified / total_leads * 100, 1) if total_leads else 0.0,
+        "avg_runtime_seconds": round(runtime_sum / runtime_count, 1) if runtime_count else None,
+        "runtime_sample_size": runtime_count,
+        "outcome_totals": {
+            "valid": total_verified,
+            "invalid": total_invalid,
+            "catchall": total_catchall,
+        },
+        "disk_size_kb": round(disk_bytes / 1024, 1),
+        "recent_runs": runs[:5],
+        "recent_sample": latest_sample[:8],
+    })
 
 
 @bp.route("/history/<filename>")

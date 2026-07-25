@@ -86,7 +86,7 @@
         if (el) el.textContent = id === 'statRuntime' ? '0s' : '—';
       });
       const sourcesEl = document.getElementById('statSources');
-      if (sourcesEl) sourcesEl.textContent = 'Apollo & Apify sources';
+      if (sourcesEl) sourcesEl.textContent = 'Apify source';
       // Hide table + ICP
       document.getElementById('panelTable').style.display = 'none';
       document.getElementById('crmPlaceholder').style.display = 'flex';
@@ -95,7 +95,6 @@
       document.getElementById('searchCard').style.display    = 'none';
       document.getElementById('searchPlaceholder').style.display = 'flex';
       // Reset charts
-      if (chartSource) { chartSource.data.datasets[0].data = [0,0,0]; chartSource.update(); }
       if (chartVerify) { chartVerify.data.datasets[0].data = [0,0,0,0]; chartVerify.update(); }
     }
 
@@ -194,17 +193,6 @@
       };
 
       const target = parseInt(document.getElementById('targetLeads').value) || 25;
-      const max_pages = parseInt(document.getElementById('maxPages').value) || 10;
-      const enable_apollo = document.getElementById('enableApollo').checked;
-      const enable_apify = document.getElementById('enableApify').checked;
-      const enable_explorium = document.getElementById('enableExplorium').checked;
-      const explorium_api_key = document.getElementById('exploriumApiKey').value.trim();
-      const verifier_provider = document.querySelector('input[name="verifierProvider"]:checked').value;
-
-      if (!enable_apollo && !enable_apify && !enable_explorium) {
-        showAlert('warning', 'Please enable at least one scraper (Apollo, Apify, or Explorium) to search for leads.');
-        return;
-      }
 
       hideAlert();
       resetUI();
@@ -230,14 +218,8 @@
           body: JSON.stringify({
             icp: customICP,
             target,
-            max_pages,
-            enable_apollo,
-            enable_apify,
-            enable_explorium,
-            explorium_api_key,
-            verifier_provider,
+            verifier_provider: 'gmail_bounce',
             profile: selectedSourceProfile,
-            apify_actor: getSelectedApifyActor()
           })
         });
         const data = await res.json();

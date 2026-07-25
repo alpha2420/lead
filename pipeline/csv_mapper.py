@@ -77,6 +77,14 @@ def suggest_csv_column_mapping(headers: list[str], sample_row: dict) -> dict:
     Rule-based synonym match first (cheap, deterministic); Gemini fills in only
     the columns still unresolved after that pass, and only if any remain.
 
+    A canonical field may legitimately be claimed by more than one source
+    header — e.g. merging multiple CSVs (different tools, different naming:
+    "Email" vs "Contact Email") both describing the same field. clean_csv_row()
+    resolves the actual value per row by preferring whichever header has data,
+    so candidate fields here are NOT removed once one header claims them —
+    doing so would starve every other file's differently-named column of a
+    home, silently blanking out its data on export.
+
     Returns {"mapping": {source_header: canonical_key_or_None, ...}, "ai_used_for": [source_header, ...]}.
     """
     mapping = {}
@@ -86,8 +94,7 @@ def suggest_csv_column_mapping(headers: list[str], sample_row: dict) -> dict:
         mapping[h] = match
 
     unmapped_headers = [h for h, v in mapping.items() if v is None]
-    mapped_keys = {v for v in mapping.values() if v}
-    unmapped_fields = [k for k in _CSV_MAPPER_FIELDS if k not in mapped_keys]
+    unmapped_fields = list(_CSV_MAPPER_FIELDS.keys())
     ai_used_for = []
 
     if unmapped_headers and unmapped_fields and pl.GEMINI_API_KEY:
@@ -241,9 +248,22 @@ def clean_csv_row(row: dict, mapping: dict) -> dict:
     extra: dict = {}
     issues: list = []
 
+    # More than one source header can map to the same canonical key (merged
+    # CSVs with different naming conventions for the same field — see
+    # suggest_csv_column_mapping()). Each row only ever has data under ONE of
+    # those headers (it came from one file), so resolve per row: prefer
+    # whichever mapped header actually has a value here, falling back to the
+    # first one. Plain last-key-wins iteration would let a later, empty
+    # header silently blank out an earlier header's real value.
+    resolved_headers: dict = {}
     for source_header, canonical_key in mapping.items():
         if not canonical_key:
             continue
+        current = resolved_headers.get(canonical_key)
+        if current is None or (not _safe(row.get(current)) and _safe(row.get(source_header))):
+            resolved_headers[canonical_key] = source_header
+
+    for canonical_key, source_header in resolved_headers.items():
         raw = row.get(source_header, "")
 
         if canonical_key in ("email", "email2"):

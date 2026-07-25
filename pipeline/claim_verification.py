@@ -111,28 +111,55 @@ def _extract_verifiable_claims(icp: dict) -> dict:
     return claims
 
 
-def _run_apify_claim_search(companies: list[str], claims: dict) -> dict:
-    """Runs one Apify google-search-scraper call with one query per unique
-    company (paired with the technology claim if present, else the industry
-    claim), returning {company: [snippet dicts]}. Mirrors pl.scrape_apify()'s
-    POST-then-GET mechanics exactly, but with far fewer results per query
-    since we only need a few snippets to judge a claim, not exhaustive leads.
-    Never sends anything but the company name and the ICP's own claim
-    values — no raw user inquiry text."""
+def _run_apify_claim_search(companies: list[str], claims: dict, company_domains: dict | None = None) -> dict:
+    """Runs one Apify google-search-scraper call, returning {company:
+    [snippet dicts]}. Mirrors pl.scrape_apify()'s POST-then-GET mechanics
+    exactly, but with far fewer results per query since we only need a few
+    snippets to judge a claim, not exhaustive leads. Never sends anything
+    but the company name and the ICP's own claim values — no raw user
+    inquiry text.
+
+    Every company gets its normal unscoped query (paired with the
+    technology claim if present, else the industry claim). When a
+    company's domain is also known (company_domains), a SECOND query
+    scoped with site:{domain} is added — the "Website" verification leg:
+    evidence from the company's own site, additive on top of the broader
+    web search rather than replacing it (a company's homepage often
+    doesn't literally restate a fact a press mention or review site would
+    — narrowing to site: only would lose that). Both queries' snippets
+    fold into the same evidence pool for that company and the same Gemini
+    claim-check call below — no new verdict type, no new module. This
+    roughly doubles query volume only for companies with a known domain;
+    this stage already runs on the final ~20-25 lead sample only, so the
+    added cost is small and bounded."""
     api_token = os.getenv("APIFY_API_TOKEN")
     if not api_token or not companies:
         return {}
 
+    company_domains = company_domains or {}
     tech = claims.get("technology")
     industry = claims.get("industry")
-    queries_list = []
-    for company in companies:
+
+    def base_term(company: str) -> str:
         term = f'"{company}"'
         if tech:
             term += f' "{tech}"'
         elif industry:
             term += f' {industry}'
+        return term
+
+    # query_owners is parallel to queries_list — which company each line's
+    # results belong to, since a company may contribute one or two lines.
+    queries_list: list[str] = []
+    query_owners: list[str] = []
+    for company in companies:
+        term = base_term(company)
         queries_list.append(term)
+        query_owners.append(company)
+        domain = company_domains.get(company)
+        if domain:
+            queries_list.append(f"{term} site:{domain}")
+            query_owners.append(company)
 
     run_input = {
         "queries": "\n".join(queries_list),
@@ -178,25 +205,25 @@ def _run_apify_claim_search(companies: list[str], claims: dict) -> dict:
         pl.log.error("Apify claim-verification dataset fetch failed: %s", e)
         return {}
 
-    if len(items) != len(companies):
+    if len(items) != len(queries_list):
         pl.log.warning(
-            "Apify claim-verification: submitted %d company queries but got %d result pages back — "
+            "Apify claim-verification: submitted %d queries but got %d result pages back — "
             "results past the shorter length will be dropped, remaining pairs may be misaligned.",
-            len(companies), len(items),
+            len(queries_list), len(items),
         )
 
     results: dict = {}
-    for company, page in zip(companies, items):
+    for owner, page in zip(query_owners, items):
         if isinstance(page, dict):
             organic_results = page.get("organicResults", [])
         elif isinstance(page, list):
             organic_results = page
         else:
             organic_results = []
-        results[company] = [
+        results.setdefault(owner, []).extend(
             {"title": r.get("title", ""), "description": r.get("description", "")}
             for r in organic_results if isinstance(r, dict)
-        ]
+        )
 
     return results
 
@@ -311,7 +338,14 @@ def verify_claims_for_leads(leads: list[dict], icp: dict, on_progress=None) -> l
             companies_needing_search.append(company)
 
     if companies_needing_search:
-        snippets_by_company = _run_apify_claim_search(companies_needing_search, claims)
+        # First non-empty company_domain among a company's leads, if any —
+        # feeds the additive site:{domain} query leg in _run_apify_claim_search.
+        company_domains = {
+            company: next((l.get("company_domain") for l in company_leads if l.get("company_domain")), None)
+            for company, company_leads in leads_by_company.items()
+            if company in companies_needing_search
+        }
+        snippets_by_company = _run_apify_claim_search(companies_needing_search, claims, company_domains)
         verdicts = verify_company_claims_with_gemini(snippets_by_company, claims) if snippets_by_company else {}
         for company in companies_needing_search:
             verdict = verdicts.get(company) or {"evidence": "No search evidence found."}

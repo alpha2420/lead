@@ -201,6 +201,44 @@
       letter-spacing: 0.06em; margin: 2px 0 -2px;
     }
 
+    /* Search drawer wizard — Describe/Refine ICP/Configure & Run sections.
+       Visually a cousin of .strategy-module above, but deliberately NOT
+       the same class: .strategy-module-body caps at max-height:900px for
+       a transition effect, which would silently clip a section that wraps
+       many nested accordions (Refine ICP alone can exceed that). Plain
+       display:none/block avoids the cap entirely, and adds a "locked"
+       state a simple accordion doesn't need. */
+    .wizard-section { border: 1px solid var(--border); border-radius: var(--radius-sm); margin-bottom: 10px; overflow: hidden; }
+    .wizard-section-header {
+      display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+      cursor: pointer; user-select: none; background: var(--surface);
+      font-size: 0.78rem; font-weight: 700; color: var(--text); transition: var(--transition);
+    }
+    .wizard-section-header:hover { background: var(--bg-card); }
+    .wizard-section.locked .wizard-section-header { cursor: not-allowed; color: var(--text-dim); }
+    .wizard-section-num {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 18px; height: 18px; border-radius: 50%; flex-shrink: 0;
+      background: var(--surface-hi); color: var(--text-dim); font-size: 0.68rem; font-weight: 700;
+      transition: var(--transition);
+    }
+    .wizard-section.open .wizard-section-num,
+    .wizard-section.done .wizard-section-num { background: var(--blue); color: #fff; }
+    .wizard-section-summary {
+      margin-left: auto; font-size: 0.68rem; font-weight: 500; color: var(--text-dim);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 160px;
+    }
+    .wizard-section-chevron { font-size: 0.62rem; color: var(--text-dim); transition: transform 0.2s; flex-shrink: 0; }
+    .wizard-section.open .wizard-section-chevron { transform: rotate(180deg); }
+    .wizard-section-body { display: none; padding: 12px; border-top: 1px solid var(--border); }
+    .wizard-section.open .wizard-section-body { display: flex; flex-direction: column; gap: 10px; }
+
+    .wizard-progress { display: flex; align-items: center; gap: 6px; padding: 2px 2px 14px; }
+    .wizard-progress-step { display: flex; align-items: center; gap: 5px; font-size: 0.68rem; font-weight: 600; color: var(--text-dim); white-space: nowrap; }
+    .wizard-progress-step.active { color: var(--blue); }
+    .wizard-progress-step.done { color: var(--green); }
+    .wizard-progress-sep { flex: 1; height: 1px; background: var(--border); min-width: 8px; }
+
     /* Coverage Analysis — standalone card, not an accordion item (meant to
        be glanced at, not buried behind a click) */
     .coverage-card { border: 1px solid var(--border); border-radius: var(--radius-xs); background: var(--surface); padding: 12px; margin-bottom: 7px; }

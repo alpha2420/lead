@@ -1,5 +1,4 @@
-"""ICP generation, buyer-ICP generation, coverage estimation, and chat
-refinement routes."""
+"""ICP generation, buyer-ICP generation, and chat refinement routes."""
 
 import logging
 
@@ -25,6 +24,32 @@ def generate_icp_only():
         return jsonify({"status": "success", "icp": icp})
     except Exception as e:
         logger.error("Failed to generate ICP: %s", e)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@bp.route("/generate-icp-from-website", methods=["POST"])
+def generate_icp_from_website():
+    """Scrapes a company's own website and infers the ICP of the customers
+    that company should be targeting. See pl.parse_website_to_icp()."""
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "request body must be a JSON object"}), 400
+    website = (data.get("website") or "").strip()
+    if not website:
+        return jsonify({"error": "website is required"}), 400
+
+    try:
+        result = pl.parse_website_to_icp(website)
+        return jsonify({
+            "status": "success",
+            "icp": result.get("icp"),
+            "source_url": result.get("source_url"),
+            "site_title": result.get("site_title"),
+        })
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+    except Exception as e:
+        logger.error("Failed to generate ICP from website: %s", e)
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
@@ -55,24 +80,30 @@ def generate_buyer_icp():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-@bp.route("/estimate-coverage", methods=["POST"])
-def estimate_coverage_route():
+@bp.route("/generate-buyer-icp-from-website", methods=["POST"])
+def generate_buyer_icp_from_website():
+    """Scrapes a website (e.g. a data vendor's product page) and infers WHO
+    WOULD BUY the dataset/audience it describes. See pl.parse_buyer_inquiry_from_website()."""
     data = request.get_json(force=True, silent=True)
     if not isinstance(data, dict):
         return jsonify({"error": "request body must be a JSON object"}), 400
-    icp = data.get("icp")
-    if not icp:
-        return jsonify({"error": "icp object is required"}), 400
-    try:
-        target = int(data.get("target", 25))
-    except (TypeError, ValueError):
-        return jsonify({"error": "target must be a number"}), 400
+    website = (data.get("website") or "").strip()
+    if not website:
+        return jsonify({"error": "website is required"}), 400
 
     try:
-        estimate = pl.estimate_coverage(icp, target)
-        return jsonify({"status": "success", "estimate": estimate})
+        result = pl.parse_buyer_inquiry_from_website(website)
+        return jsonify({
+            "status": "success",
+            "icp": result.get("icp"),
+            "buyer_report": result.get("buyer_report"),
+            "source_url": result.get("source_url"),
+            "site_title": result.get("site_title"),
+        })
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
     except Exception as e:
-        logger.error("Failed to estimate coverage: %s", e)
+        logger.error("Failed to generate buyer ICP from website: %s", e)
         return jsonify({"status": "error", "message": str(e)}), 500
 
 

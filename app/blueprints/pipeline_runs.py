@@ -32,17 +32,13 @@ def start_run():
     try:
         target = int(data.get("target", 25))
         max_pages = int(data.get("max_pages", 10))
+        min_composite_score = float(data["min_composite_score"]) if data.get("min_composite_score") is not None else None
     except (TypeError, ValueError):
-        return jsonify({"error": "target/max_pages must be numbers"}), 400
+        return jsonify({"error": "target/max_pages/min_composite_score must be numbers"}), 400
 
-    enable_apollo     = bool(data.get("enable_apollo", True))
-    enable_apify      = bool(data.get("enable_apify", True))
-    enable_explorium  = bool(data.get("enable_explorium", False))
-    explorium_api_key = data.get("explorium_api_key")
-    verifier_provider = str(data.get("verifier_provider", "custom"))
+    verifier_provider = str(data.get("verifier_provider", "gmail_bounce"))
     icp               = data.get("icp")
     profile           = str(data.get("profile", "balanced"))
-    apify_actor       = data.get("apify_actor") or None
 
     run_id = uuid.uuid4().hex
     registry = _registry()
@@ -56,14 +52,10 @@ def start_run():
             "inquiry": inquiry,
             "target": target,
             "max_pages": max_pages,
-            "enable_apollo": enable_apollo,
-            "enable_apify": enable_apify,
-            "enable_explorium": enable_explorium,
-            "explorium_api_key": explorium_api_key,
             "verifier_provider": verifier_provider,
             "icp": icp,
             "profile": profile,
-            "apify_actor": apify_actor,
+            "min_composite_score": min_composite_score,
         },
         daemon=True,
     )
@@ -84,16 +76,12 @@ def start_custom_run():
     try:
         target = int(data.get("target", 25))
         max_pages = int(data.get("max_pages", 10))
+        min_composite_score = float(data["min_composite_score"]) if data.get("min_composite_score") is not None else None
     except (TypeError, ValueError):
-        return jsonify({"error": "target/max_pages must be numbers"}), 400
+        return jsonify({"error": "target/max_pages/min_composite_score must be numbers"}), 400
 
-    enable_apollo     = bool(data.get("enable_apollo", True))
-    enable_apify      = bool(data.get("enable_apify", True))
-    enable_explorium  = bool(data.get("enable_explorium", False))
-    explorium_api_key = data.get("explorium_api_key")
-    verifier_provider = str(data.get("verifier_provider", "custom"))
+    verifier_provider = str(data.get("verifier_provider", "gmail_bounce"))
     profile           = str(data.get("profile", "balanced"))
-    apify_actor       = data.get("apify_actor") or None
 
     run_id = uuid.uuid4().hex
     registry = _registry()
@@ -107,14 +95,10 @@ def start_custom_run():
             "inquiry": "Custom ICP Run",
             "target": target,
             "max_pages": max_pages,
-            "enable_apollo": enable_apollo,
-            "enable_apify": enable_apify,
-            "enable_explorium": enable_explorium,
-            "explorium_api_key": explorium_api_key,
             "verifier_provider": verifier_provider,
             "icp": icp,
             "profile": profile,
-            "apify_actor": apify_actor,
+            "min_composite_score": min_composite_score,
         },
         daemon=True,
     )
@@ -130,7 +114,7 @@ def start_imported_run():
         target = int(request.form.get("target", 25))
     except (TypeError, ValueError):
         return jsonify({"error": "target must be a number"}), 400
-    verifier_provider = request.form.get("verifier_provider", "custom")
+    verifier_provider = request.form.get("verifier_provider", "gmail_bounce")
     if not inquiry:
         return jsonify({"error": "inquiry is required"}), 400
 

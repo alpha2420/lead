@@ -70,12 +70,13 @@ LeadFlow bundles several core modules that work synchronously to deliver premium
 * **How it works**: Uses the Gemini API to parse free-form text. It translates simple sentences into a structured target JSON object and builds a professional target profile.
 * **Deliverable**: A comprehensive Ideal Customer Profile (ICP) including core buyer personas, firmographics, pain points, trigger signals, common sales objections, and negative criteria (who to avoid).
 
-### B. Multi-Source Scraping Engine
-* **Goal**: Gathers leads from both structured databases and the live web.
-* **Data Providers**:
-  * **Apollo.io API**: Scrapes structured business profiles, filtering on title, geography, and size.
-  * **Apify API (Google Search/LinkedIn Crawler)**: Performs targeted Google site-specific queries (`site:linkedin.com/in/`) to find current LinkedIn profiles matching specific titles and tech stacks.
-  * **Explorium.ai API**: Conducts contact lookup and enriches prospects with phone numbers, mobile coordinates, and professional emails.
+### B. Lead Sourcing & Cross-Verification Engine
+* **Goal**: Gathers structured lead profiles from a single reliable provider, then cross-checks them against live LinkedIn data.
+* **Sourcing**:
+  * **Apify API (`code_crafter/leads-finder` actor)**: This pipeline's sole lead-sourcing platform. Runs once per search against the ICP's titles, industries, geography, and company-size filters.
+  * **Company-First Discovery (optional)**: Gemini + live web search can identify and validate a candidate company list from the ICP's firmographics first, scoping the Apify search to just those companies instead of an open ICP-wide search.
+* **Cross-Verification**:
+  * **Bright Data LinkedIn Dataset API**: Confirms each lead's current employer and title against their live LinkedIn profile, catching stale or inaccurate scraped data. Results are cached for 30 days.
 
 ### C. Intelligent Data Deduplication & Standardization
 * **Goal**: Prevents redundant outreach and saves API credits.
@@ -86,7 +87,8 @@ LeadFlow bundles several core modules that work synchronously to deliver premium
 ### D. Advanced Email Verification Pipeline
 * **Goal**: Minimizes bounces and protects outbound email server domain health.
 * **Providers**:
-  * **ZeroBounce API**: Industry-standard cloud-based verification.
+  * **Gmail Bounce Verifier (default)**: Sends a real email from the configured Gmail sender to each lead and watches the inbox for a bounce — the ground-truth check the UI uses.
+  * **ZeroBounce API**: Optional paid cloud-based verification, selectable via the API.
   * **Custom SMTP/DNS Verifier**: A free built-in backup that validates email syntax, queries target domain MX records, and initiates SMTP handshakes with mail servers to verify existence without sending emails.
 * **Thresholding**: Only emails achieving a **confidence score ≥ 95** pass to the selection phase.
 
@@ -116,11 +118,11 @@ The platform leverages specialized APIs to power each stage of the pipeline:
 
 | API Service | Integration Layer | Role in Platform |
 | :--- | :--- | :--- |
-| **Gemini API** | `google.genai.Client` | Translates raw text inquiries into structured ICPs; parses organic web search snippets into clean lead profiles; generates corporate emails; provides strategic business assumptions. |
-| **Apollo.io API** | Mixed People Search POST Endpoint | Pulls structured employee profiles, titles, and verified contacts directly from Apollo's index. |
-| **Apify API** | Google Search Scraper Actor Run | Automates Google organic search queries targeted at LinkedIn profiles for real-time web scraping. |
-| **Explorium.ai API** | Prospects Search & Bulk Enrich | Searches prospect lists and pulls enriched mobile phone numbers and email contacts. |
-| **ZeroBounce API** | Batch Email Validation API | Validates deliverability of candidate emails and flags bad domains or catch-all addresses. |
+| **Gemini API** | `google.genai.Client` | Translates raw text inquiries into structured ICPs; discovers/validates candidate companies via web search; verifies company claims; reranks the final sample; provides strategic business assumptions. |
+| **Apify API** | `code_crafter/leads-finder` actor | This pipeline's sole lead-sourcing platform — pulls structured lead profiles matching the ICP's titles, industries, geography, and company size. |
+| **Bright Data Dataset API** | LinkedIn profile scrape | Cross-verifies each lead's current employer/title against their live LinkedIn profile (cached 30 days). |
+| **Gmail SMTP/IMAP** | `verify_emails_via_gmail_bounce()` | Default email verifier — sends a real email and watches the inbox for a bounce to confirm deliverability. |
+| **ZeroBounce API** | Batch Email Validation API | Optional paid verifier (`provider=zerobounce`); validates deliverability and flags bad domains or catch-alls. |
 
 ### C. Data Flow Pipeline
 The diagram below illustrates how an inquiry moves through the system, transitioning from raw text to a verified lead list:
@@ -129,31 +131,32 @@ The diagram below illustrates how an inquiry moves through the system, transitio
 graph TD
     A[Raw Text Inquiry] --> B[Gemini AI Inquiry Parser]
     B --> C[Structured ICP Criteria]
-    
-    C --> D1[Apollo API Client]
-    C --> D2[Apify Web Scraper]
-    C --> D3[Explorium API Client]
-    
-    D1 --> E[Raw Leads Pool]
-    D2 --> E
-    D3 --> E
-    
-    E --> F[Deduplication & Standardization Engine]
-    F --> G[Cleaned Leads Pool]
-    
-    G --> H{Email Verifier Select}
-    H -->|ZeroBounce API| I1[ZeroBounce Validation]
-    H -->|Custom Verifier| I2[DNS & SMTP Handshake Check]
-    
-    I1 --> J[Verified Leads Pool]
-    I2 --> J
-    
-    J --> K[Sample Selection Engine]
-    K --> L[Premium Target Leads]
-    
-    L --> M1[Downloadable CSV]
-    L --> M2[Run Summary Text Report]
-    L --> M3[JSON History Metadata]
+
+    C --> D1[Company Discovery + Validation<br/>Gemini + Web Search]
+    D1 --> D2[Apify leads-finder Actor]
+    C --> D2
+
+    D2 --> E[Raw Leads Pool]
+    E --> F[Deduplication & Standardization]
+    F --> G[LinkedIn Cross-Verify<br/>Bright Data]
+    G --> H[Domain Match Signal]
+
+    H --> I{Email Verifier Select}
+    I -->|gmail_bounce, default| J1[Gmail Send + Bounce Watch]
+    I -->|zerobounce| J2[ZeroBounce API]
+    I -->|custom| J3[DNS & SMTP Handshake Check]
+
+    J1 --> K[Composite Scoring & Sample Selection]
+    J2 --> K
+    J3 --> K
+
+    K --> L[Claim Verification]
+    L --> M[Organization Enrichment]
+    M --> N[AI Reranking]
+
+    N --> O1[Downloadable CSV]
+    N --> O2[Run Summary Text Report]
+    N --> O3[JSON History Metadata]
 ```
 
 ---
@@ -165,11 +168,13 @@ LeadFlow was conceived to solve the manual overhead associated with launching ou
 1. **Milestone 1: Proof of Concept (CLI-based)**
    * Built the core sequential pipeline in Python, querying Apollo and verifying emails via DNS.
 2. **Milestone 2: Multi-Source Enrichment**
-   * Added Apify web scraping capabilities, Google Organic result parsing with Gemini, and integrated the Explorium API to query corporate contacts.
+   * Added Apify web scraping capabilities, Google Organic result parsing with Gemini, and (since retired) Apollo and Explorium API integrations.
 3. **Milestone 3: Real-Time Web Dashboard**
    * Implemented the Flask server, created a multi-threaded queue handler, and built the Server-Sent Events (SSE) log console.
-4. **Milestone 4: Premium UI Redesign (Current State)**
+4. **Milestone 4: Premium UI Redesign**
    * Transformed the dashboard with a dark space theme, adding moving background orbs, responsive layouts, SVG badges, and a custom API health diagnosis check.
+5. **Milestone 5: Pipeline Consolidation & Quality Pass (Current State)**
+   * Retired the Apollo and Explorium data sources in favor of Apify as the sole lead-sourcing platform, backed by a Bright Data LinkedIn cross-verification stage, quality gates, composite scoring, claim verification, organization enrichment, and AI reranking — a 13-stage pipeline. Split the former monolithic `app.py`/`pipeline.py` into `app/` Blueprints and a `pipeline/` package. Replaced the dark space theme with a light-first, Stripe/Attio-style visual language.
 
 ### B. Current Status
 * **Version**: 1.3.0

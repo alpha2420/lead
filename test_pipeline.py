@@ -1,5 +1,6 @@
 import json
 import os
+import tempfile
 import time
 import unittest
 from unittest.mock import MagicMock, patch
@@ -37,6 +38,129 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(res["status"], "invalid")
         self.assertEqual(res["score"], 0.0)
 
+    # ── Gmail Bounce Check — real-send cap (1/run, not 1/call) ─────────────
+
+    @patch("time.sleep")
+    @patch("imaplib.IMAP4_SSL")
+    @patch("smtplib.SMTP")
+    def test_gmail_bounce_caps_real_sends_to_one_per_run(self, mock_smtp_cls, mock_imap_cls, mock_sleep):
+        mock_smtp = MagicMock()
+        mock_smtp_cls.return_value = mock_smtp
+        mock_imap = MagicMock()
+        mock_imap_cls.return_value = mock_imap
+        mock_imap.search.return_value = ("OK", [b""])  # no bounce messages found
+
+        emails = [f"user{i}@example.com" for i in range(5)]
+        with patch("pipeline.GMAIL_SENDER_ADDRESS", "me@gmail.com"), \
+             patch("pipeline.GMAIL_APP_PASSWORD", "fakepassword1234"):
+            results = pl.verify_emails_via_gmail_bounce(emails, run_id="test-cap-basic")
+
+        self.assertEqual(mock_smtp.send_message.call_count, 1)
+        self.assertEqual(results[emails[0]], {"status": "valid", "score": 95.0})
+        for addr in emails[1:]:
+            self.assertEqual(results[addr], {"status": "unverified", "score": 50.0})
+
+    @patch("time.sleep")
+    @patch("imaplib.IMAP4_SSL")
+    @patch("smtplib.SMTP")
+    def test_gmail_bounce_cap_persists_across_calls_same_run(self, mock_smtp_cls, mock_imap_cls, mock_sleep):
+        mock_smtp = MagicMock()
+        mock_smtp_cls.return_value = mock_smtp
+        mock_imap = MagicMock()
+        mock_imap_cls.return_value = mock_imap
+        mock_imap.search.return_value = ("OK", [b""])
+
+        with patch("pipeline.GMAIL_SENDER_ADDRESS", "me@gmail.com"), \
+             patch("pipeline.GMAIL_APP_PASSWORD", "fakepassword1234"):
+            pl.verify_emails_via_gmail_bounce(["a@x.com", "b@x.com", "c@x.com"], run_id="test-cap-persist")
+            self.assertEqual(mock_smtp_cls.call_count, 1)
+
+            second = pl.verify_emails_via_gmail_bounce(
+                ["d@x.com", "e@x.com", "f@x.com", "g@x.com"], run_id="test-cap-persist"
+            )
+
+        # A second call sharing the same run must never touch SMTP at all —
+        # the run's one real send was already used on the first call.
+        self.assertEqual(mock_smtp_cls.call_count, 1)
+        for res in second.values():
+            self.assertEqual(res, {"status": "unverified", "score": 50.0})
+
+    @patch("time.sleep")
+    @patch("imaplib.IMAP4_SSL")
+    @patch("smtplib.SMTP")
+    def test_gmail_bounce_different_run_ids_get_independent_budgets(self, mock_smtp_cls, mock_imap_cls, mock_sleep):
+        mock_smtp = MagicMock()
+        mock_smtp_cls.return_value = mock_smtp
+        mock_imap = MagicMock()
+        mock_imap_cls.return_value = mock_imap
+        mock_imap.search.return_value = ("OK", [b""])
+
+        with patch("pipeline.GMAIL_SENDER_ADDRESS", "me@gmail.com"), \
+             patch("pipeline.GMAIL_APP_PASSWORD", "fakepassword1234"):
+            pl.verify_emails_via_gmail_bounce(["a@x.com"], run_id="run-A")
+            pl.verify_emails_via_gmail_bounce(["b@x.com"], run_id="run-B")
+
+        self.assertEqual(mock_smtp.send_message.call_count, 2)
+
+    @patch("time.sleep")
+    @patch("imaplib.IMAP4_SSL")
+    @patch("smtplib.SMTP")
+    def test_gmail_bounce_on_progress_reaches_total_with_skipped_addresses(self, mock_smtp_cls, mock_imap_cls, mock_sleep):
+        mock_smtp = MagicMock()
+        mock_smtp_cls.return_value = mock_smtp
+        mock_imap = MagicMock()
+        mock_imap_cls.return_value = mock_imap
+        mock_imap.search.return_value = ("OK", [b""])
+
+        progress_calls = []
+        with patch("pipeline.GMAIL_SENDER_ADDRESS", "me@gmail.com"), \
+             patch("pipeline.GMAIL_APP_PASSWORD", "fakepassword1234"):
+            pl.verify_emails_via_gmail_bounce(
+                ["a@x.com", "b@x.com", "c@x.com"],
+                on_progress=lambda done, total: progress_calls.append((done, total)),
+                run_id="test-progress",
+            )
+
+        self.assertTrue(progress_calls)
+        self.assertEqual(progress_calls[-1], (3, 3))
+
+    @patch("time.sleep")
+    @patch("imaplib.IMAP4_SSL")
+    @patch("smtplib.SMTP")
+    def test_gmail_bounce_unconfigured_and_login_failure_stay_unknown_and_dont_consume_budget(
+        self, mock_smtp_cls, mock_imap_cls, mock_sleep
+    ):
+        # 1. Not configured at all — never touches smtplib, comes back "unknown".
+        with patch("pipeline.GMAIL_SENDER_ADDRESS", None), \
+             patch("pipeline.GMAIL_APP_PASSWORD", None):
+            results = pl.verify_emails_via_gmail_bounce(["a@x.com", "b@x.com"], run_id="test-unconfigured")
+        for res in results.values():
+            self.assertEqual(res, {"status": "unknown", "score": 50.0})
+        mock_smtp_cls.assert_not_called()
+
+        # 2. SMTP login raises — also "unknown", and must not consume the budget.
+        mock_smtp_login_fail = MagicMock()
+        mock_smtp_login_fail.login.side_effect = Exception("auth failed")
+        mock_smtp_cls.return_value = mock_smtp_login_fail
+        with patch("pipeline.GMAIL_SENDER_ADDRESS", "me@gmail.com"), \
+             patch("pipeline.GMAIL_APP_PASSWORD", "wrongpassword"):
+            results = pl.verify_emails_via_gmail_bounce(["c@x.com"], run_id="test-login-fail")
+        for res in results.values():
+            self.assertEqual(res, {"status": "unknown", "score": 50.0})
+
+        # 3. A follow-up call on the SAME run_id with working credentials
+        #    must still get the real send — the failed attempt above never
+        #    reached a real send, so it shouldn't have burned the budget.
+        mock_smtp_ok = MagicMock()
+        mock_smtp_cls.return_value = mock_smtp_ok
+        mock_imap = MagicMock()
+        mock_imap_cls.return_value = mock_imap
+        mock_imap.search.return_value = ("OK", [b""])
+        with patch("pipeline.GMAIL_SENDER_ADDRESS", "me@gmail.com"), \
+             patch("pipeline.GMAIL_APP_PASSWORD", "fakepassword1234"):
+            pl.verify_emails_via_gmail_bounce(["d@x.com"], run_id="test-login-fail")
+        self.assertEqual(mock_smtp_ok.send_message.call_count, 1)
+
     def test_dedupe_leads_basic(self):
         leads = [
             {"name": "John Doe", "email": "john@example.com", "company": "A Company"},
@@ -45,7 +169,7 @@ class TestPipeline(unittest.TestCase):
             {"name": "Jane Smith", "email": "", "company": "B Company"},  # duplicate fingerprint
         ]
 
-        cleaned, seen_emails, seen_fingerprints = pl.dedupe_leads(leads)
+        cleaned, seen_emails, seen_fingerprints, seen_linkedin_ids, seen_phones = pl.dedupe_leads(leads)
         self.assertEqual(len(cleaned), 2)
         self.assertIn("john@example.com", seen_emails)
         self.assertEqual(len(seen_fingerprints), 1)
@@ -53,6 +177,62 @@ class TestPipeline(unittest.TestCase):
         # Standardized values check
         self.assertEqual(cleaned[0]["name"], "John Doe")
         self.assertEqual(cleaned[1]["name"], "Jane Smith")
+
+    def test_dedupe_leads_catches_linkedin_url_duplicate_with_different_emails(self):
+        # Same person, different email addresses across pages, but the same
+        # LinkedIn profile — previously slipped through as two "new" leads.
+        leads = [
+            {"name": "Amy Lee", "email": "amy@old-domain.com", "company": "Acme",
+             "linkedin_url": "https://www.linkedin.com/in/amy-lee-123"},
+            {"name": "Amy Lee", "email": "amy@new-domain.com", "company": "Acme",
+             "linkedin_url": "https://linkedin.com/in/amy-lee-123?trk=abc"},
+        ]
+        cleaned, _, _, seen_linkedin_ids, _ = pl.dedupe_leads(leads)
+        self.assertEqual(len(cleaned), 1)
+        self.assertIn("amy-lee-123", seen_linkedin_ids)
+
+    def test_dedupe_leads_catches_phone_duplicate(self):
+        # _normalize_phone_value() only recognizes a shared number across
+        # formats when both include (or both omit) the leading '+' — it
+        # doesn't strip an implicit country code, so this deliberately uses
+        # two '+'-prefixed variants of the same number.
+        leads = [
+            {"name": "Bob Ray", "email": "bob@one.com", "company": "Co", "phone": "+1 (555) 123-4567"},
+            {"name": "Bob R.", "email": "bob@two.com", "company": "Co", "phone": "+1-555-123-4567"},
+        ]
+        cleaned, _, _, _, seen_phones = pl.dedupe_leads(leads)
+        self.assertEqual(len(cleaned), 1)
+        self.assertEqual(len(seen_phones), 1)
+
+    def test_apply_quality_gates_hard_rejects_no_contact_method(self):
+        leads = [
+            {"name": "No Contact", "company": "Acme", "email": "", "phone": "", "linkedin_url": ""},
+            {"name": "Has Email", "company": "Acme", "email": "jane@acme.com", "phone": "", "linkedin_url": ""},
+        ]
+        passed, rejected = pl.apply_quality_gates(leads, icp={})
+        self.assertEqual(len(passed), 1)
+        self.assertEqual(len(rejected), 1)
+        self.assertEqual(rejected[0]["_quality_gate_reason"], "no_contact_method")
+        self.assertEqual(passed[0]["name"], "Has Email")
+
+    def test_apply_quality_gates_flags_role_based_email_as_soft_signal(self):
+        leads = [
+            {"name": "Generic Inbox", "company": "Acme", "email": "info@acme.com", "phone": "", "linkedin_url": ""},
+        ]
+        passed, rejected = pl.apply_quality_gates(leads, icp={})
+        self.assertEqual(len(rejected), 0)
+        self.assertEqual(len(passed), 1)
+        self.assertIn("role_based_email", passed[0]["_quality_flags"])
+
+    def test_is_role_based_email(self):
+        self.assertTrue(pl.is_role_based_email("info@acme.com"))
+        self.assertTrue(pl.is_role_based_email("Support@Acme.com"))
+        self.assertFalse(pl.is_role_based_email("jane.doe@acme.com"))
+        self.assertFalse(pl.is_role_based_email(""))
+
+    def test_zb_confidence_score_penalizes_role_based_sub_status(self):
+        score = pl._zb_confidence_score("valid", "role_based")
+        self.assertLessEqual(score, 40.0)
 
     def test_select_sample_tiered(self):
         # We verify that select_sample falls back correctly to Tier 2 and Tier 3 based on counts
@@ -77,6 +257,64 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(len(sample), 2)
         self.assertEqual(sample[0]["name"], "Lead 1")
         self.assertEqual(sample[1]["name"], "Lead 2")
+
+    def test_select_sample_applies_min_composite_score_floor(self):
+        leads = [
+            {"name": "High Score", "_confidence_score": 98.0, "_verification_status": "valid", "_composite_score": 90.0},
+            {"name": "Low Score", "_confidence_score": 98.0, "_verification_status": "valid", "_composite_score": 20.0},
+        ]
+        sample = pl.select_sample(leads, icp={}, min_count=1, max_count=None, min_confidence=95.0, min_composite_score=50.0)
+        self.assertEqual([l["name"] for l in sample], ["High Score"])
+
+    def test_select_sample_underfill_message_mentions_score_floor(self):
+        leads = [
+            {"name": "Only One", "_confidence_score": 98.0, "_verification_status": "valid", "_composite_score": 90.0},
+            {"name": "Below Floor", "_confidence_score": 98.0, "_verification_status": "valid", "_composite_score": 10.0},
+        ]
+        with self.assertLogs("pipeline", level="WARNING") as log_ctx:
+            sample = pl.select_sample(leads, icp={}, min_count=5, max_count=None, min_confidence=95.0, min_composite_score=50.0)
+        self.assertEqual(len(sample), 1)
+        self.assertTrue(any("score floor" in msg.lower() or "composite-score floor" in msg.lower() for msg in log_ctx.output))
+
+    def test_company_size_fit_score_within_range(self):
+        icp = {"company_intelligence": {"company_size_min": 50, "company_size_max": 500}}
+        lead = {"employee_count": "200"}
+        self.assertEqual(pl._company_size_fit_score(lead, icp), 100.0)
+
+    def test_company_size_fit_score_penalizes_out_of_range(self):
+        icp = {"company_intelligence": {"company_size_min": 50, "company_size_max": 500}}
+        far_outside = {"employee_count": "50000"}
+        just_outside = {"employee_count": "600"}
+        self.assertLess(pl._company_size_fit_score(far_outside, icp), pl._company_size_fit_score(just_outside, icp))
+        self.assertLess(pl._company_size_fit_score(far_outside, icp), 100.0)
+
+    def test_company_size_fit_score_neutral_when_lead_has_no_size_data(self):
+        icp = {"company_intelligence": {"company_size_min": 50, "company_size_max": 500}}
+        self.assertEqual(pl._company_size_fit_score({}, icp), 50.0)
+
+    def test_company_size_fit_score_neutral_when_icp_has_no_constraint(self):
+        self.assertEqual(pl._company_size_fit_score({"employee_count": "50000"}, icp={}), 50.0)
+
+    def test_company_size_fit_score_handles_range_bucket(self):
+        icp = {"company_intelligence": {"company_size_min": 50, "company_size_max": 500}}
+        self.assertEqual(pl._company_size_fit_score({"employee_count": "51-200"}, icp), 100.0)
+
+    def test_location_fit_score_matches_target_location(self):
+        icp = {"geography_intelligence": {"states": ["California"]}}
+        lead = {"city": "San Francisco", "state": "California", "country": "United States"}
+        self.assertEqual(pl._location_fit_score(lead, icp), 100.0)
+
+    def test_location_fit_score_penalizes_mismatch(self):
+        icp = {"geography_intelligence": {"states": ["California"]}}
+        lead = {"city": "New York", "state": "New York", "country": "United States"}
+        self.assertEqual(pl._location_fit_score(lead, icp), 20.0)
+
+    def test_location_fit_score_neutral_when_lead_has_no_location(self):
+        icp = {"geography_intelligence": {"states": ["California"]}}
+        self.assertEqual(pl._location_fit_score({}, icp), 50.0)
+
+    def test_location_fit_score_neutral_when_icp_has_no_constraint(self):
+        self.assertEqual(pl._location_fit_score({"city": "Austin"}, icp={}), 50.0)
 
     @patch("google.genai.Client")
     def test_generate_content_with_retry_success(self, mock_client_cls):
@@ -147,55 +385,6 @@ class TestPipeline(unittest.TestCase):
             pl.generate_json_with_retry("test prompt", client=mock_client, max_attempts=2)
         self.assertEqual(mock_client.models.generate_content.call_count, 2)
 
-    @patch("requests.post")
-    def test_scrape_explorium_success(self, mock_post):
-        # Mock responses
-        mock_search_resp = MagicMock()
-        mock_search_resp.json.return_value = {
-            "data": [
-                {
-                    "prospect_id": "exp_id_123",
-                    "full_name": "Satya Nadella",
-                    "company_name": "Microsoft",
-                    "job_title": "CEO",
-                    "city": "Redmond",
-                    "region_name": "Washington",
-                    "country_name": "US",
-                    "linkedin": "linkedin.com/in/satya",
-                    "some_custom_attribute": "custom_val"
-                }
-            ]
-        }
-        
-        mock_enrich_resp = MagicMock()
-        mock_enrich_resp.json.return_value = {
-            "data": [
-                {
-                    "prospect_id": "exp_id_123",
-                    "data": {
-                        "emails": [{"address": "satyan@microsoft.com", "type": "professional"}],
-                        "phone_numbers": [{"phone_number": "+14258828080"}],
-                        "mobile_phone": "+14258828080"
-                    }
-                }
-            ]
-        }
-        
-        mock_post.side_effect = [mock_search_resp, mock_enrich_resp]
-        
-        icp = {
-            "buying_committee_intelligence": {
-                "primary_titles": ["CEO"], "seniority": ["C-Level"], "departments": ["IT"],
-            },
-            "geography_intelligence": {"countries": ["United States"]},
-        }
-
-        leads = pl.scrape_explorium(icp, max_leads=10, page=1, api_key="test_key")
-        self.assertEqual(len(leads), 1)
-        self.assertEqual(leads[0]["name"], "Satya Nadella")
-        self.assertEqual(leads[0]["email"], "satyan@microsoft.com")
-        self.assertEqual(leads[0]["explorium_some_custom_attribute"], "custom_val")
-        self.assertEqual(leads[0]["explorium_phone"], "+14258828080")
 
     @patch("google.genai.Client")
     def test_chat_icp_returns_suggested_replies(self, mock_client_cls):
@@ -210,39 +399,78 @@ class TestPipeline(unittest.TestCase):
         self.assertIn("suggested_replies", res)
         self.assertEqual(res["suggested_replies"], ["+ CTO", "+ SaaS"])
 
-    def test_build_apify_input_with_industry_and_exclusions(self):
-        icp = {
-            "buying_committee_intelligence": {"primary_titles": ["VP Marketing"]},
-            "geography_intelligence": {"countries": ["United States"]},
-            "industry_intelligence": {"sub_industries": ["Fintech"], "exclude_industries": ["Retail", "Agencies"]},
-        }
-        res = pl._build_apify_input(icp, max_leads=25)
-        queries = res["queries"]
-        # VP Marketing should pair with the sub-industry term and location, with exclusions appended
-        self.assertIn('site:linkedin.com/in/ "VP Marketing" "Fintech" "United States" -"Retail" -"Agencies"', queries)
+    # ── pipeline/reranking.py — Stage 12 AI reranking ────────────────────────
 
-    @patch("requests.post")
-    def test_scrape_apollo_payload_with_custom_filters(self, mock_post):
-        mock_resp = MagicMock()
-        mock_resp.text = '{"people": []}'
-        mock_resp.status_code = 200
-        mock_post.return_value = mock_resp
+    @patch("google.genai.Client")
+    def test_rerank_final_sample_reorders_by_rerank_score(self, mock_client_cls):
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+        mock_response = MagicMock()
+        # Lead 0 (currently first) scores low; lead 1 (currently second) scores high.
+        mock_response.text = json.dumps({
+            "0": {"score": 20, "rationale": "Wrong sub-role despite title match."},
+            "1": {"score": 95, "rationale": "Strong holistic fit."},
+        })
+        mock_client.models.generate_content.return_value = mock_response
 
-        icp = {
-            "buying_committee_intelligence": {"primary_titles": ["VP Marketing"]},
-            "geography_intelligence": {"countries": ["United States"]},
-            "industry_intelligence": {"exclude_industries": ["Retail", "Agencies"]},
-        }
-        pl.scrape_apollo(icp, max_leads=25, page=1)
+        sample = [
+            {"name": "Lead A", "title": "Director of Facilities", "company": "Acme", "_composite_score": 80.0},
+            {"name": "Lead B", "title": "Director of Sales", "company": "Acme", "_composite_score": 79.0},
+        ]
+        icp = {"icp_summary": "Sales directors at mid-market companies"}
 
-        # Verify post payload
-        called_args, called_kwargs = mock_post.call_args
-        payload = called_kwargs["json"]
-        self.assertEqual(payload["person_titles"], ["VP Marketing"])
-        self.assertEqual(payload["person_locations"], ["United States"])
-        self.assertEqual(payload["q_organization_not_search_list"], ["Retail", "Agencies"])
-        self.assertNotIn("organization_domains", payload)
-        self.assertNotIn("q_organization_search_list", payload)
+        with patch("pipeline.GEMINI_API_KEY", "fake-key"):
+            reranked = pl.rerank_final_sample(sample, icp)
+
+        self.assertEqual([l["name"] for l in reranked], ["Lead B", "Lead A"])
+        self.assertEqual(reranked[0]["_rerank_score"], 95.0)
+        # Original deterministic scoring is untouched.
+        self.assertEqual(reranked[0]["_composite_score"], 79.0)
+
+    @patch("google.genai.Client")
+    def test_rerank_final_sample_never_sends_raw_pii_or_unlisted_fields(self, mock_client_cls):
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+        mock_response = MagicMock()
+        mock_response.text = json.dumps({"0": {"score": 50, "rationale": "ok"}})
+        mock_client.models.generate_content.return_value = mock_response
+
+        sample = [{
+            "name": "Lead A", "title": "CTO", "company": "Acme",
+            "email": "leadA@acme.com", "phone": "+15551234567",
+            "linkedin_url": "https://linkedin.com/in/leada",
+        }]
+        icp = {"icp_summary": "CTOs"}
+
+        with patch("pipeline.GEMINI_API_KEY", "fake-key"):
+            pl.rerank_final_sample(sample, icp)
+
+        prompt = mock_client.models.generate_content.call_args.kwargs.get("contents") \
+            or mock_client.models.generate_content.call_args.args[-1]
+        self.assertNotIn("leadA@acme.com", prompt)
+        self.assertNotIn("+15551234567", prompt)
+        self.assertNotIn("linkedin.com/in/leada", prompt)
+
+    def test_rerank_final_sample_graceful_without_api_key(self):
+        sample = [{"name": "Lead A"}, {"name": "Lead B"}]
+        with patch("pipeline.GEMINI_API_KEY", None):
+            result = pl.rerank_final_sample(sample, icp={})
+        self.assertEqual(result, sample)
+        self.assertNotIn("_rerank_score", result[0])
+
+    @patch("google.genai.Client")
+    def test_rerank_final_sample_graceful_on_gemini_failure(self, mock_client_cls):
+        mock_client_cls.side_effect = RuntimeError("network error")
+        sample = [{"name": "Lead A"}, {"name": "Lead B"}]
+        with patch("pipeline.GEMINI_API_KEY", "fake-key"):
+            result = pl.rerank_final_sample(sample, icp={})
+        self.assertEqual([l["name"] for l in result], ["Lead A", "Lead B"])
+
+    def test_rerank_final_sample_noop_on_empty_sample(self):
+        with patch("pipeline.GEMINI_API_KEY", "fake-key"):
+            self.assertEqual(pl.rerank_final_sample([], icp={}), [])
+
+
 
     def test_icp_schema_block_includes_business_model(self):
         self.assertIn('"business_model"', pl._icp_schema_block())
@@ -258,8 +486,8 @@ class TestPipeline(unittest.TestCase):
         # Regression coverage for a live-diagnosed bug: Gemini invented a
         # descriptive geography qualifier ("United States (Eastern Time
         # Zone cities)") that isn't a real place a lead database recognizes,
-        # returning 0 Apollo matches. The prompt must explicitly warn
-        # against this class of self-defeating invented specificity.
+        # returning 0 matches. The prompt must explicitly warn against this
+        # class of self-defeating invented specificity.
         rules = pl._icp_prompt_rules()
         self.assertIn("Eastern Time Zone", rules)
 
@@ -306,156 +534,8 @@ class TestPipeline(unittest.TestCase):
     # raw user text (e.g. a "smarter" fallback when an ICP field is sparse)
     # fails a test instead of silently leaking free-text into a scraper query.
 
-    @patch("requests.post")
-    def test_scrape_apollo_never_sends_raw_text(self, mock_post):
-        mock_resp = MagicMock()
-        mock_resp.text = '{"people": []}'
-        mock_resp.status_code = 200
-        mock_post.return_value = mock_resp
 
-        icp = {
-            "buying_committee_intelligence": {"primary_titles": ["VP Marketing"]},
-            "industry_intelligence": {"primary_industry": "SaaS"},
-            "geography_intelligence": {"countries": ["United States"]},
-        }
-        pl.scrape_apollo(icp, max_leads=25, page=1)
 
-        _, kwargs = mock_post.call_args
-        payload = kwargs["json"]
-        self.assertTrue(set(payload.keys()) <= {
-            "page", "per_page", "person_titles", "organization_num_employees_ranges",
-            "person_locations", "q_organization_keyword_tags", "q_organization_not_search_list",
-        })
-
-    # ── Apollo 2-step search + enrich (api_search + people/match) ──────────
-
-    def test_enrich_apollo_person_caches_and_returns_data(self):
-        data = {"id": "p1", "name": "Jane Doe", "email": "jane@chubb.com"}
-        pl._cache_apollo_enrichment("test-enrich-roundtrip", data)
-        cached = pl._get_cached_apollo_enrichment("test-enrich-roundtrip")
-        self.assertEqual(cached, data)
-
-    @patch("requests.post")
-    def test_scrape_apollo_two_step_flow(self, mock_post):
-        search_resp = MagicMock()
-        search_resp.status_code = 200
-        search_resp.text = json.dumps({"people": [
-            {"id": "p1", "has_email": True, "first_name": "Jane"},
-        ]})
-        search_resp.json.return_value = json.loads(search_resp.text)
-
-        enrich_resp = MagicMock()
-        enrich_resp.json.return_value = {"person": {
-            "id": "p1", "name": "Jane Doe", "title": "CIO", "email": "jane@chubb.com",
-            "linkedin_url": "https://www.linkedin.com/in/janedoe", "city": "Philadelphia",
-            "organization": {"name": "Chubb", "industry": "insurance", "short_description": "A P&C insurer.",
-                              "technology_names": ["Duck Creek"], "estimated_num_employees": 30000,
-                              "primary_domain": "chubb.com"},
-        }}
-
-        mock_post.side_effect = [search_resp, enrich_resp]
-
-        icp = _icp_with_title("CIO")
-        with patch("pipeline._get_cached_apollo_enrichment", return_value=None), \
-             patch("pipeline._cache_apollo_enrichment"):
-            leads = pl.scrape_apollo(icp, max_leads=25, page=1)
-
-        self.assertEqual(len(leads), 1)
-        self.assertEqual(leads[0]["name"], "Jane Doe")
-        self.assertEqual(leads[0]["email"], "jane@chubb.com")
-        self.assertEqual(leads[0]["company"], "Chubb")
-        self.assertEqual(leads[0]["industry"], "insurance")
-        self.assertIn("Duck Creek", leads[0]["technology"])
-        self.assertEqual(mock_post.call_count, 2)
-        # Second call is the enrichment, sent only the candidate id
-        _, enrich_kwargs = mock_post.call_args_list[1]
-        self.assertEqual(enrich_kwargs["json"], {"id": "p1", "reveal_personal_emails": True})
-
-    @patch("requests.post")
-    def test_scrape_apollo_skips_candidates_without_email(self, mock_post):
-        search_resp = MagicMock()
-        search_resp.status_code = 200
-        search_resp.text = json.dumps({"people": [
-            {"id": "p1", "has_email": False, "first_name": "NoEmail"},
-        ]})
-        search_resp.json.return_value = json.loads(search_resp.text)
-        mock_post.return_value = search_resp
-
-        icp = _icp_with_title("CIO")
-        leads = pl.scrape_apollo(icp, max_leads=25, page=1)
-
-        self.assertEqual(leads, [])
-        # Only the search call happened — no enrichment call for the has_email=False candidate
-        self.assertEqual(mock_post.call_count, 1)
-
-    @patch("requests.post")
-    def test_scrape_apollo_keyword_tags_stay_short(self, mock_post):
-        # Live-tested: Apollo's q_organization_keyword_tags near-exact
-        # phrase-matches each tag — a long descriptive phrase (like a raw
-        # sub_industry string) reliably returns 0 candidates, while a
-        # 1-2 word tag returns real matches. Each built tag must stay short
-        # regardless of how verbose the source ICP field is.
-        search_resp = MagicMock()
-        search_resp.status_code = 200
-        search_resp.text = '{"people": []}'
-        search_resp.json.return_value = {"people": []}
-        mock_post.return_value = search_resp
-
-        icp = {
-            "buying_committee_intelligence": {"primary_titles": ["CIO"]},
-            "industry_intelligence": {
-                "primary_industry": "Insurance",
-                "sub_industries": ["Property & Casualty Insurance Carriers and MGAs"],
-            },
-        }
-        pl.scrape_apollo(icp, max_leads=25, page=1)
-
-        _, kwargs = mock_post.call_args
-        tags = kwargs["json"]["q_organization_keyword_tags"]
-        for tag in tags:
-            self.assertLessEqual(len(tag.split()), 2)
-
-    def test_build_apollo_keyword_tags_trims_and_dedupes(self):
-        icp = {
-            "industry_intelligence": {
-                "primary_industry": "Property & Casualty Insurance",
-                "sub_industries": ["Commercial Insurance"],
-            },
-            "technology_intelligence": {"confirmed_technologies": ["Duck Creek (Policy, Billing, Claims)"]},
-            "search_intelligence": {"business_keywords": ["insurance", "core systems modernization"]},
-        }
-        tags = pl._build_apollo_keyword_tags(icp)
-        self.assertIn("Property Casualty", tags)   # "&" dropped
-        self.assertIn("Commercial Insurance", tags)
-        self.assertIn("Duck Creek", tags)            # compound tail stripped, then capped
-        self.assertIn("insurance", tags)
-        self.assertIn("core systems", tags)          # 3-word keyword capped to 2
-        for tag in tags:
-            self.assertLessEqual(len(tag.split()), 2)
-
-    def test_build_apollo_keyword_tags_prioritizes_niche_terms_over_generic_tech(self):
-        # Live-tested regression: a real ICP (medical bed manufacturers)
-        # had Gemini infer a full generic B2B tech stack (Salesforce, SAP,
-        # HubSpot, etc.) that has nothing to do with the niche. With
-        # max_tags capping the array, those generic vendor names crowded
-        # out every real search_keyword entry, leaving 8 irrelevant tags
-        # that returned 0 Apollo matches. sub_industries/search_keywords
-        # must win the budget over technographics.
-        icp = {
-            "industry_intelligence": {
-                "primary_industry": "Medical Equipment",
-                "sub_industries": ["Medical Bed Manufacturing"],
-            },
-            "technology_intelligence": {
-                "likely_technologies": ["Salesforce", "HubSpot", "SAP", "Oracle NetSuite", "AWS", "Microsoft Azure"],
-            },
-            "search_intelligence": {"business_keywords": ["hospital bed manufacturer", "patient bed supplier"]},
-        }
-        tags = pl._build_apollo_keyword_tags(icp, max_tags=4)
-        self.assertIn("hospital bed", tags)
-        self.assertIn("patient bed", tags)
-        self.assertNotIn("Salesforce", tags)
-        self.assertNotIn("SAP", tags)
 
     # ── Business Intelligence accessor layer ────────────────────────────────
 
@@ -485,8 +565,7 @@ class TestPipeline(unittest.TestCase):
     def test_bi_keyword_pool_prioritizes_curated_over_generic_technology(self):
         # Regression coverage: confirmed this session that search_intelligence's
         # curated business/product keywords must win the budget over Gemini's
-        # own generic likely_technologies inference, same principle as the
-        # Apollo-specific priority test but at the shared accessor level.
+        # own generic likely_technologies inference.
         icp = {
             "industry_intelligence": {"primary_industry": "Insurance"},
             "technology_intelligence": {"likely_technologies": ["Salesforce", "SAP"]},
@@ -496,6 +575,7 @@ class TestPipeline(unittest.TestCase):
         curated_idx = min(pool.index("Duck Creek"), pool.index("core systems"))
         generic_idx = min(pool.index("Salesforce"), pool.index("SAP"))
         self.assertLess(curated_idx, generic_idx)
+
 
     def test_extract_verifiable_claims_noops_cleanly_on_empty_technology(self):
         # Regression coverage: _extract_verifiable_claims() must not silently
@@ -509,83 +589,10 @@ class TestPipeline(unittest.TestCase):
         claims = pl._extract_verifiable_claims(icp)
         self.assertEqual(claims, {"industry": "Insurance"})
 
-    def test_clean_apollo_locations_strips_invented_qualifiers(self):
-        # Live-tested: Apollo returns 0 matches for a non-standard
-        # descriptive geography string like "United States (Eastern Time
-        # Zone cities)" — it's not a real place Apollo recognizes. Stripping
-        # the parenthetical recovers "United States", which matches
-        # hundreds of thousands of real profiles.
-        self.assertEqual(
-            pl._clean_apollo_locations(["United States (Eastern Time Zone cities)"]),
-            ["United States"],
-        )
-        self.assertEqual(
-            pl._clean_apollo_locations(["New York", "United States (EST Zone)"]),
-            ["New York", "United States"],
-        )
 
-    @patch("requests.post")
-    def test_scrape_apollo_cleans_geography_in_payload(self, mock_post):
-        mock_resp = MagicMock()
-        mock_resp.text = '{"people": []}'
-        mock_resp.status_code = 200
-        mock_post.return_value = mock_resp
 
-        icp = {
-            "buying_committee_intelligence": {"primary_titles": ["CEO"]},
-            "geography_intelligence": {"countries": ["United States (Eastern Time Zone cities)"]},
-        }
-        pl.scrape_apollo(icp, max_leads=25, page=1)
 
-        _, kwargs = mock_post.call_args
-        self.assertEqual(kwargs["json"]["person_locations"], ["United States"])
 
-    @patch("pipeline._cache_apollo_enrichment")
-    @patch("pipeline._get_cached_apollo_enrichment", return_value=None)
-    @patch("requests.post")
-    def test_enrich_apollo_person_never_sends_raw_text(self, mock_post, mock_cache_read, mock_cache_write):
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"person": {"id": "p1"}}
-        mock_post.return_value = mock_resp
-
-        pl._enrich_apollo_person("p1")
-
-        _, kwargs = mock_post.call_args
-        self.assertEqual(kwargs["json"], {"id": "p1", "reveal_personal_emails": True})
-
-    def test_build_apify_input_never_sends_raw_text(self):
-        icp = {
-            "buying_committee_intelligence": {"primary_titles": ["VP Marketing"]},
-            "industry_intelligence": {"primary_industry": "SaaS"},
-            "geography_intelligence": {"countries": ["United States"]},
-            "search_intelligence": {"business_keywords": ["fintech"]},
-        }
-        result = pl._build_apify_input(icp, max_leads=50)
-        self.assertEqual(set(result.keys()), {
-            "queries", "maxPagesPerQuery", "resultsPerPage", "mobileResults",
-        })
-
-    @patch("requests.post")
-    def test_scrape_explorium_never_sends_raw_text(self, mock_post):
-        mock_search_resp = MagicMock()
-        mock_search_resp.json.return_value = {"data": []}
-        mock_post.return_value = mock_search_resp
-
-        icp = {
-            "buying_committee_intelligence": {
-                "primary_titles": ["CEO"], "seniority": ["C-Level"], "departments": ["IT"],
-            },
-            "geography_intelligence": {"countries": ["United States"]},
-        }
-        pl.scrape_explorium(icp, max_leads=10, page=1, api_key="test_key")
-
-        _, kwargs = mock_post.call_args
-        payload = kwargs["json"]
-        self.assertTrue(set(payload.keys()) <= {"mode", "size", "page_size", "page", "filters"})
-        self.assertTrue(set(payload["filters"].keys()) <= {
-            "has_email", "job_level", "job_department", "country_code",
-            "company_size", "job_title",
-        })
 
     # ── Organization Enrichment (Stage 8) ──────────────────────────────────
 
@@ -614,38 +621,7 @@ class TestPipeline(unittest.TestCase):
         self.assertIsNone(result)
         mock_cache_write.assert_not_called()
 
-    @patch("pipeline._cache_org_enrichment")
-    @patch("pipeline._get_cached_org_enrichment", return_value=None)
-    @patch("requests.get")
-    def test_enrich_organizations_for_leads_dedupes_by_domain(self, mock_get, mock_cache_read, mock_cache_write):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"organization": {"industry": "Consulting"}}
-        mock_get.return_value = mock_resp
 
-        leads = [
-            {"name": "A", "email": "a@mercer.com", "company": "Mercer"},
-            {"name": "B", "email": "b@mercer.com", "company": "Mercer"},
-        ]
-        pl.enrich_organizations_for_leads(leads)
-
-        self.assertEqual(mock_get.call_count, 1)
-        self.assertEqual(leads[0]["industry"], "Consulting")
-        self.assertEqual(leads[1]["industry"], "Consulting")
-
-    @patch("pipeline._cache_org_enrichment")
-    @patch("pipeline._get_cached_org_enrichment", return_value=None)
-    @patch("requests.get")
-    def test_enrich_organization_never_sends_raw_text(self, mock_get, mock_cache_read, mock_cache_write):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"organization": {}}
-        mock_get.return_value = mock_resp
-
-        pl.enrich_organization("mercer.com")
-
-        _, kwargs = mock_get.call_args
-        self.assertEqual(kwargs["params"], {"domain": "mercer.com"})
 
     # ── Dynamic Claim Verification (Stage 8) + query-builder fix ───────────
 
@@ -663,22 +639,6 @@ class TestPipeline(unittest.TestCase):
         icp = {"technology_intelligence": {"confirmed_technologies": ["Duck Creek (Policy, Billing, Claims)"]}}
         self.assertEqual(pl._bi_primary_technology(icp), "Duck Creek")
 
-    def test_build_apify_input_prefers_specific_technology_over_generic_crm(self):
-        icp = {
-            "buying_committee_intelligence": {"primary_titles": ["CIO"]},
-            "industry_intelligence": {"primary_industry": "Insurance"},
-            "geography_intelligence": {"countries": ["North America"]},
-            "technology_intelligence": {"likely_technologies": ["Salesforce"], "confirmed_technologies": ["Duck Creek Technologies"]},
-        }
-        res = pl._build_apify_input(icp, max_leads=25)
-        queries = res["queries"].splitlines()
-        # Tech takes priority over industry (live-tested: combining both
-        # exact-quoted terms in one query starves Google search results),
-        # but the per-title query must pair with the specific
-        # "Duck Creek Technologies", not the generic "Salesforce" — that's
-        # the one guarantee _bi_primary_technology()'s confirmed-over-likely
-        # priority exists to provide.
-        self.assertEqual(queries[0], 'site:linkedin.com/in/ "CIO" "Duck Creek Technologies" "North America"')
 
     def test_extract_verifiable_claims_dynamic(self):
         icp_with_tech = {
@@ -779,6 +739,50 @@ class TestPipeline(unittest.TestCase):
         payload = kwargs["json"]
         self.assertEqual(set(payload.keys()), {"queries", "maxPagesPerQuery", "resultsPerPage", "mobileResults"})
         self.assertEqual(payload["queries"], '"Chubb" "Duck Creek Technologies"')
+
+    @patch("requests.get")
+    @patch("requests.post")
+    def test_run_apify_claim_search_adds_additive_site_query_when_domain_known(self, mock_post, mock_get):
+        # The Website verification leg: a known domain adds a SECOND,
+        # site:-scoped query line alongside the original unscoped one —
+        # additive evidence, not a replacement (see docstring).
+        mock_post_resp = MagicMock()
+        mock_post_resp.json.return_value = {"data": {"defaultDatasetId": "ds123"}}
+        mock_post.return_value = mock_post_resp
+        mock_get_resp = MagicMock()
+        mock_get_resp.json.return_value = [
+            {"organicResults": [{"title": "Unscoped result", "description": "..."}]},
+            {"organicResults": [{"title": "Site-scoped result", "description": "..."}]},
+        ]
+        mock_get.return_value = mock_get_resp
+
+        claims = {"technology": "Duck Creek Technologies"}
+        results = pl._run_apify_claim_search(["Chubb"], claims, company_domains={"Chubb": "chubb.com"})
+
+        _, kwargs = mock_post.call_args
+        queries = kwargs["json"]["queries"].split("\n")
+        self.assertEqual(len(queries), 2)
+        self.assertEqual(queries[0], '"Chubb" "Duck Creek Technologies"')
+        self.assertEqual(queries[1], '"Chubb" "Duck Creek Technologies" site:chubb.com')
+        # Both queries' snippets merged under the one company key.
+        titles = {r["title"] for r in results["Chubb"]}
+        self.assertEqual(titles, {"Unscoped result", "Site-scoped result"})
+
+    @patch("requests.get")
+    @patch("requests.post")
+    def test_run_apify_claim_search_no_site_query_without_domain(self, mock_post, mock_get):
+        mock_post_resp = MagicMock()
+        mock_post_resp.json.return_value = {"data": {"defaultDatasetId": "ds123"}}
+        mock_post.return_value = mock_post_resp
+        mock_get_resp = MagicMock()
+        mock_get_resp.json.return_value = [{"organicResults": []}]
+        mock_get.return_value = mock_get_resp
+
+        claims = {"industry": "Insurance"}
+        pl._run_apify_claim_search(["Chubb"], claims, company_domains={})
+
+        queries = mock_post.call_args[1]["json"]["queries"].split("\n")
+        self.assertEqual(len(queries), 1)
 
     def test_compute_composite_scores_folds_in_claim_verification(self):
         icp = _icp_with_title("CIO")
@@ -892,86 +896,6 @@ class TestPipeline(unittest.TestCase):
         self.assertIn("contact_job_title", kwargs["json"])
         self.assertNotIn("queries", kwargs["json"])
 
-    @patch("requests.get")
-    @patch("requests.post")
-    def test_scrape_apify_default_actor_still_uses_google_search_path(self, mock_post, mock_get):
-        mock_post_resp = MagicMock()
-        mock_post_resp.json.return_value = {"data": {"defaultDatasetId": "ds1"}}
-        mock_post.return_value = mock_post_resp
-        mock_get_resp = MagicMock()
-        mock_get_resp.json.return_value = [{"organicResults": []}]
-        mock_get.return_value = mock_get_resp
-
-        icp = _icp_with_title("CIO")
-        with patch.dict(os.environ, {"APIFY_API_TOKEN": "test_token", "APIFY_ACTOR_ID": "apify/google-search-scraper"}):
-            pl.scrape_apify(icp, max_leads=10)
-
-        _, kwargs = mock_post.call_args
-        self.assertIn("queries", kwargs["json"])
-        self.assertNotIn("contact_job_title", kwargs["json"])
-
-    # ── crawlerbros/lead-finder (live-confirmed working, no plan restriction) ──
-
-    def test_build_crawlerbros_input_maps_icp_fields(self):
-        icp = {
-            "buying_committee_intelligence": {"primary_titles": ["CIO"]},
-            "industry_intelligence": {"primary_industry": "Insurance"},
-            "geography_intelligence": {"countries": ["North America"]},
-        }
-        run_input = pl._build_crawlerbros_input(icp, max_leads=25)
-        self.assertEqual(run_input["maxLeads"], 25)
-        self.assertIn("CIO", run_input["jobTitles"])
-        self.assertEqual(run_input["locations"], ["North America"])
-        self.assertEqual(run_input["industries"], ["Insurance"])
-
-    def test_build_crawlerbros_input_never_sends_raw_text(self):
-        icp = {
-            "buying_committee_intelligence": {"primary_titles": ["CIO"]},
-            "industry_intelligence": {"primary_industry": "Insurance"},
-            "geography_intelligence": {"countries": ["North America"]},
-        }
-        run_input = pl._build_crawlerbros_input(icp, max_leads=25)
-        self.assertTrue(set(run_input.keys()) <= {
-            "jobTitles", "locations", "industries", "companyNames", "maxLeads",
-        })
-
-    def test_parse_crawlerbros_results_maps_fields(self):
-        items = [[{
-            "full_name": "Tony Dean", "title": "President and CIO",
-            "company_name": "Auto-Owners Insurance", "location": "Lansing",
-            "linkedin_url": "https://www.linkedin.com/in/tony-dean",
-            "company_domain": "auto-owners.com", "email": "tony.dean@auto-owners.com",
-        }]]
-        leads = pl._parse_crawlerbros_results(items)
-        self.assertEqual(len(leads), 1)
-        lead = leads[0]
-        self.assertEqual(lead["name"], "Tony Dean")
-        self.assertEqual(lead["company"], "Auto-Owners Insurance")
-        self.assertEqual(lead["email"], "tony.dean@auto-owners.com")
-        self.assertEqual(lead["company_domain"], "auto-owners.com")
-        self.assertEqual(lead["source"], "apify")
-
-    @patch("requests.get")
-    @patch("requests.post")
-    def test_scrape_apify_dispatches_to_crawlerbros_when_configured(self, mock_post, mock_get):
-        mock_post_resp = MagicMock()
-        mock_post_resp.json.return_value = {"data": {"defaultDatasetId": "ds1"}}
-        mock_post.return_value = mock_post_resp
-        mock_get_resp = MagicMock()
-        mock_get_resp.json.return_value = [[{"full_name": "Tony Dean", "company_name": "Auto-Owners Insurance"}]]
-        mock_get.return_value = mock_get_resp
-
-        icp = _icp_with_title("CIO")
-        with patch.dict(os.environ, {"APIFY_API_TOKEN": "test_token", "APIFY_ACTOR_ID": "crawlerbros/lead-finder"}):
-            leads = pl.scrape_apify(icp, max_leads=10)
-
-        self.assertEqual(len(leads), 1)
-        self.assertEqual(leads[0]["name"], "Tony Dean")
-        _, kwargs = mock_post.call_args
-        self.assertIn("jobTitles", kwargs["json"])
-        self.assertNotIn("queries", kwargs["json"])
-        self.assertNotIn("contact_job_title", kwargs["json"])
-
     @patch("time.sleep")
     @patch("requests.get")
     @patch("requests.post")
@@ -997,363 +921,42 @@ class TestPipeline(unittest.TestCase):
         mock_get.side_effect = get_side_effect
 
         icp = _icp_with_title("CIO")
-        with patch.dict(os.environ, {"APIFY_API_TOKEN": "test_token", "APIFY_ACTOR_ID": "crawlerbros/lead-finder"}):
+        with patch.dict(os.environ, {"APIFY_API_TOKEN": "test_token", "APIFY_ACTOR_ID": "code_crafter/leads-finder"}):
             leads = pl.scrape_apify(icp, max_leads=50)
 
         self.assertEqual(len(leads), 1)
         self.assertEqual(leads[0]["name"], "Tony Dean")
         mock_sleep.assert_called()  # confirms it actually polled, not just trusted the first response
 
-    # ── Source Orchestrator (profiles / priority waterfall / execution mode) ──
+    # ── pipeline/geography.py — deterministic geography backstop ────────────
 
-    def test_source_profiles_have_required_fields(self):
-        for name, profile in pl._SOURCE_PROFILES.items():
-            self.assertIn("priority_order", profile, name)
-            self.assertIn("execution_mode", profile, name)
-            self.assertIn("source_limits", profile, name)
-            self.assertIn(profile["execution_mode"], ("sequential", "parallel"), name)
+    def test_expand_timezone_labels_expands_eastern_to_real_states(self):
+        expanded = pl.expand_timezone_labels(["US Eastern Time Zone"])
+        self.assertIn("New York", expanded)
+        self.assertIn("Florida", expanded)
+        self.assertNotIn("California", expanded)
 
-    def test_run_lead_sources_balanced_profile_matches_current_limits(self):
-        # Regression guard: "balanced" must call each source with today's
-        # exact pre-orchestrator limits (25/50/50) so the default profile is
-        # provably behavior-preserving, not just structurally similar.
-        icp = _icp_with_title("CIO")
-        with patch("pipeline.scrape_apollo", return_value=[]) as mock_apollo, \
-             patch("pipeline.scrape_apify", return_value=[]) as mock_apify, \
-             patch("pipeline.scrape_explorium", return_value=[]) as mock_explorium:
-            pl.run_lead_sources(icp, page=1, profile="balanced", enable_explorium=True, target=25, max_pages=10)
+    def test_expand_timezone_labels_recognizes_abbreviation(self):
+        expanded = pl.expand_timezone_labels(["PST"])
+        self.assertIn("California", expanded)
+        self.assertIn("Washington", expanded)
 
-        mock_apollo.assert_called_once_with(icp, max_leads=25, page=1, organization_domains=None)
-        mock_apify.assert_called_once_with(icp, max_leads=50, actor_override=None, company_names=None)
-        mock_explorium.assert_called_once_with(icp, max_leads=50, page=1, api_key=None)
+    def test_expand_timezone_labels_passes_through_non_timezone_locations(self):
+        expanded = pl.expand_timezone_labels(["Austin", "Pacific Northwest"])
+        self.assertEqual(expanded, ["Austin", "Pacific Northwest"])
 
-    def test_run_lead_sources_sequential_waterfall_skips_lower_priority_when_quota_met(self):
-        icp = _icp_with_title("CIO")
-        # target=100, max_pages=10 -> per_page_target=10 -> quota=max(30,10)=30
-        big_batch = [{"name": f"Lead {i}"} for i in range(40)]
-        with patch("pipeline.scrape_apollo", return_value=big_batch) as mock_apollo, \
-             patch("pipeline.scrape_apify") as mock_apify, \
-             patch("pipeline.scrape_explorium") as mock_explorium:
-            result = pl.run_lead_sources(
-                icp, page=1, profile="balanced", enable_explorium=True,
-                target=100, max_pages=10,
-            )
+    def test_validate_locations_flags_unrecognized_place_names(self):
+        result = pl.validate_locations(["California", "United States", "Eastern Time Zone region"])
+        self.assertIn("California", result["recognized"])
+        self.assertIn("United States", result["recognized"])
+        self.assertIn("Eastern Time Zone region", result["unrecognized"])
 
-        mock_apollo.assert_called_once()
-        mock_apify.assert_not_called()
-        mock_explorium.assert_not_called()
-        self.assertEqual(result["counts"]["apollo"], 40)
-        self.assertEqual(result["counts"]["apify"], 0)
-        self.assertEqual(result["counts"]["explorium"], 0)
-
-    def test_run_lead_sources_sequential_waterfall_calls_all_when_quota_not_met(self):
-        icp = _icp_with_title("CIO")
-        with patch("pipeline.scrape_apollo", return_value=[{"name": "A"}]) as mock_apollo, \
-             patch("pipeline.scrape_apify", return_value=[{"name": "B"}]) as mock_apify, \
-             patch("pipeline.scrape_explorium", return_value=[{"name": "C"}]) as mock_explorium:
-            result = pl.run_lead_sources(
-                icp, page=1, profile="balanced", enable_explorium=True,
-                target=1000, max_pages=1,   # huge per-page quota, never satisfied by 1-lead batches
-            )
-
-        mock_apollo.assert_called_once()
-        mock_apify.assert_called_once()
-        mock_explorium.assert_called_once()
-        self.assertEqual(len(result["leads"]), 3)
-
-    def test_run_lead_sources_respects_enable_flags_filtering_profile_order(self):
-        icp = _icp_with_title("CIO")
-        with patch("pipeline.scrape_apollo", return_value=[]) as mock_apollo, \
-             patch("pipeline.scrape_apify", return_value=[]) as mock_apify, \
-             patch("pipeline.scrape_explorium", return_value=[]) as mock_explorium:
-            result = pl.run_lead_sources(
-                icp, page=1, profile="maximum_coverage",
-                enable_apollo=True, enable_apify=False, enable_explorium=True,
-                target=25, max_pages=10,
-            )
-
-        mock_apollo.assert_called_once()
-        mock_apify.assert_not_called()
-        mock_explorium.assert_called_once()
-        self.assertEqual(result["counts"]["apify"], 0)
-
-    def test_run_lead_sources_apify_only_called_on_page_one_regardless_of_profile(self):
-        icp = _icp_with_title("CIO")
-        with patch("pipeline.scrape_apollo", return_value=[]), \
-             patch("pipeline.scrape_apify") as mock_apify, \
-             patch("pipeline.scrape_explorium", return_value=[]):
-            pl.run_lead_sources(icp, page=2, profile="maximum_coverage", enable_explorium=True, target=25, max_pages=10)
-
-        mock_apify.assert_not_called()
-
-    def test_run_lead_sources_parallel_mode_calls_all_sources_concurrently(self):
-        icp = _icp_with_title("CIO")
-        sleep_seconds = 0.2
-
-        def slow_source(*args, **kwargs):
-            time.sleep(sleep_seconds)
-            return []
-
-        with patch("pipeline.scrape_apollo", side_effect=slow_source), \
-             patch("pipeline.scrape_apify", side_effect=slow_source), \
-             patch("pipeline.scrape_explorium", side_effect=slow_source):
-            start = time.time()
-            pl.run_lead_sources(icp, page=1, profile="maximum_coverage", enable_explorium=True, target=25, max_pages=10)
-            elapsed = time.time() - start
-
-        # Sequential would take ~3x sleep_seconds; parallel should take ~1x.
-        # Loose bound (2x a single sleep) to avoid CI flakiness.
-        self.assertLess(elapsed, sleep_seconds * 2)
-
-    # ── Coverage Analysis ────────────────────────────────────────────────────
-
-    def test_coverage_cache_roundtrip(self):
-        data = {"available": True, "estimated_people": 100}
-        pl._cache_coverage_estimate("test-coverage-roundtrip", data)
-        cached = pl._get_cached_coverage_estimate("test-coverage-roundtrip")
-        self.assertEqual(cached, data)
-
-    @patch("requests.post")
-    def test_apollo_search_probe_never_sends_raw_text(self, mock_post):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"total_entries": 100, "people": []}
-        mock_post.return_value = mock_resp
-
-        icp = {
-            "buying_committee_intelligence": {"primary_titles": ["CIO"]},
-            "industry_intelligence": {"primary_industry": "Insurance"},
-        }
-        pl._apollo_search_probe(icp, per_page=1)
-
-        _, kwargs = mock_post.call_args
-        payload = kwargs["json"]
-        self.assertTrue(set(payload.keys()) <= {
-            "page", "per_page", "person_titles", "organization_num_employees_ranges",
-            "person_locations", "q_organization_keyword_tags", "q_organization_not_search_list",
-        })
-
-    @patch("requests.post")
-    def test_apollo_search_probe_omit_dimension_strips_correct_payload_key(self, mock_post):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"total_entries": 100, "people": []}
-        mock_post.return_value = mock_resp
-
-        icp = {
-            "buying_committee_intelligence": {"primary_titles": ["CIO"]},
-            "industry_intelligence": {"primary_industry": "Insurance"},
-            "geography_intelligence": {"countries": ["United States"]},
-            "technology_intelligence": {"confirmed_technologies": ["Duck Creek"]},
-            "company_intelligence": {"company_size_min": 500, "company_size_max": 2000},
-            "search_intelligence": {"negative_keywords": ["Broker"]},
-        }
-        dimension_to_key = {
-            "technology": "q_organization_keyword_tags",
-            "size": "organization_num_employees_ranges",
-            "location": "person_locations",
-            "exclusions": "q_organization_not_search_list",
-        }
-        for dim, key in dimension_to_key.items():
-            pl._apollo_search_probe(icp, per_page=1, omit_dimension=dim)
-            _, kwargs = mock_post.call_args
-            self.assertNotIn(key, kwargs["json"], f"omit_dimension={dim} should strip {key}")
-
-    def test_estimate_company_count_extrapolates_from_sample_ratio(self):
-        # 10 people, 5 distinct companies -> ratio 0.5, applied to total_entries
-        sample = [{"organization": {"name": f"Company {i % 5}"}} for i in range(10)]
-        self.assertEqual(pl._estimate_company_count(sample, 1000), 500)
-        self.assertEqual(pl._estimate_company_count([], 1000), 0)
-        self.assertEqual(pl._estimate_company_count(sample, None), 0)
-
-    def test_coverage_rating_thresholds(self):
-        self.assertEqual(pl._coverage_rating(2000, 25), 5)   # 80x
-        self.assertEqual(pl._coverage_rating(600, 25), 4)    # 24x
-        self.assertEqual(pl._coverage_rating(150, 25), 3)    # 6x
-        self.assertEqual(pl._coverage_rating(30, 25), 2)     # 1.2x
-        self.assertEqual(pl._coverage_rating(10, 25), 1)     # below target
-
-    def test_detect_narrow_filters_flags_large_deltas_only(self):
-        icp = _icp_with_title("CIO")
-        # technology: 3.5x baseline (flagged), size: 1.5x baseline (not flagged),
-        # location/exclusions: no change (not flagged)
-        responses = {
-            "technology": 3500, "size": 1500, "location": 1000, "exclusions": 1000,
-        }
-        def fake_probe(icp, per_page=1, extra_keyword_tags=None, omit_dimension=None):
-            return {"total_entries": responses.get(omit_dimension), "sample_people": []}
-
-        with patch("pipeline._apollo_search_probe", side_effect=fake_probe):
-            flags = pl._detect_narrow_filters(icp, baseline_total=1000)
-
-        flagged_dims = {f["dimension"] for f in flags}
-        self.assertEqual(flagged_dims, {"technology"})
-        tech_flag = flags[0]
-        self.assertEqual(tech_flag["current_estimate"], 1000)
-        self.assertEqual(tech_flag["without_estimate"], 3500)
-        self.assertAlmostEqual(tech_flag["pct_reduction"], round((1 - 1000/3500) * 100))
-
-    def test_generate_coverage_suggestions_reads_unused_bi_fields(self):
-        icp = {
-            "technology_intelligence": {"competing_products": ["Guidewire", "Sapiens", "Majesco"]},
-            "industry_intelligence": {"adjacent_industries": ["Reinsurance", "Risk Management"]},
-        }
-        def fake_probe(icp, per_page=1, extra_keyword_tags=None, omit_dimension=None):
-            # Each suggested term adds a distinct, plausible bump over baseline
-            bump = {"Guidewire": 5000, "Sapiens": 4000, "Reinsurance": 3000, "Risk Management": 2000}
-            value = (extra_keyword_tags or [None])[0]
-            return {"total_entries": 1000 + bump.get(value, 0), "sample_people": []}
-
-        with patch("pipeline._apollo_search_probe", side_effect=fake_probe):
-            suggestions = pl._generate_coverage_suggestions(icp, baseline_total=1000)
-
-        # Only top 2 competing_products considered (Majesco excluded by the cap)
-        values = {s["value"] for s in suggestions}
-        self.assertIn("Guidewire", values)
-        self.assertIn("Sapiens", values)
-        self.assertNotIn("Majesco", values)
-        self.assertIn("Reinsurance", values)
-
-        by_value = {s["value"]: s for s in suggestions}
-        self.assertEqual(by_value["Guidewire"]["field_to_apply"], "likely_technologies")
-        self.assertEqual(by_value["Guidewire"]["type"], "competing_product")
-        self.assertEqual(by_value["Guidewire"]["estimated_reach_delta"], 5000)
-        self.assertEqual(by_value["Reinsurance"]["field_to_apply"], "industry_keywords")
-        self.assertEqual(by_value["Reinsurance"]["type"], "adjacent_industry")
-
-    def test_estimate_coverage_returns_unavailable_without_api_key(self):
-        icp = _icp_with_title("CIO")
-        with patch("pipeline.APOLLO_API_KEY", None):
-            result = pl.estimate_coverage(icp)
-        self.assertEqual(result, {"available": False, "reason": "Apollo API key not configured"})
-
-    # ── nourishing_courier/google-maps-lead-scraper ─────────────────────────
-    # Both the input schema (live-fetched from Apify's actor-definition API)
-    # and the output fixture below (a real captured dataset item from a live
-    # test run) are genuine, not guessed from marketing docs.
-
-    def test_build_google_maps_lead_scraper_input_maps_icp_fields(self):
-        icp = {
-            "industry_intelligence": {"primary_industry": "Insurance", "sub_industries": ["Auto Insurance Agency"]},
-            "geography_intelligence": {"countries": ["Columbus Ohio"]},
-        }
-        run_input = pl._build_google_maps_lead_scraper_input(icp, max_leads=25)
-        self.assertEqual(run_input["searchQueries"], ["Auto Insurance Agency in Columbus Ohio"])
-        self.assertEqual(run_input["maxResults"], 25)
-        self.assertTrue(run_input["extractEmails"])
-
-    def test_build_google_maps_lead_scraper_input_caps_query_count(self):
-        icp = {
-            "industry_intelligence": {"sub_industries": ["Term A", "Term B", "Term C"]},
-            "geography_intelligence": {"countries": ["City A", "City B", "City C"]},
-        }
-        run_input = pl._build_google_maps_lead_scraper_input(icp, max_leads=25)
-        self.assertLessEqual(len(run_input["searchQueries"]), pl._GOOGLE_MAPS_MAX_QUERIES)
-
-    def test_build_google_maps_lead_scraper_input_never_sends_raw_text(self):
-        icp = {
-            "icp_summary": "This raw free text must never leak into a query.",
-            "industry_intelligence": {"primary_industry": "Insurance"},
-            "geography_intelligence": {"countries": ["Ohio"]},
-        }
-        run_input = pl._build_google_maps_lead_scraper_input(icp, max_leads=25)
-        self.assertTrue(set(run_input.keys()) <= {
-            "searchQueries", "maxResults", "extractEmails", "extractPhotos", "extractReviews",
-        })
-        for q in run_input["searchQueries"]:
-            self.assertNotIn("raw free text", q)
-
-    def test_parse_google_maps_lead_scraper_results_maps_fields(self):
-        # Real captured dataset item from a live test run (searchQueries:
-        # ["insurance agencies in Columbus Ohio"]) — not a guessed fixture.
-        items = [[{
-            "name": "A.A. Affordable Insurance Agency of Ohio",
-            "placeId": "0x88388f0b72ba3357:0x5a27a18951eaf336",
-            "address": "1180 W Broad St, Columbus, OH 43222",
-            "phone": "(614) 221-7007",
-            "website": "http://affordablemitch.com/",
-            "email": "quotes@callmitch.net",
-            "emails": ["quotes@callmitch.net"],
-            "latitude": None, "longitude": None,
-            "plusCode": "XX59+C5 Columbus, Ohio",
-            "category": "Auto insurance agency",
-            "categories": ["Auto insurance agency"],
-            "priceLevel": None, "rating": 4.8, "reviewsCount": 593,
-            "openingHours": None, "isOpen": True,
-            "photoUrls": [], "mainPhotoUrl": None,
-            "googleMapsUrl": "https://www.google.com/maps/place/A.A.+Affordable+Insurance+Agency+of+Ohio/...",
-            "scrapedAt": "2026-07-16T07:55:52.892Z",
-            "searchQuery": "insurance agencies in Columbus Ohio",
-        }]]
-        leads = pl._parse_google_maps_lead_scraper_results(items)
-        self.assertEqual(len(leads), 1)
-        lead = leads[0]
-        self.assertEqual(lead["company"], "A.A. Affordable Insurance Agency of Ohio")
-        self.assertEqual(lead["email"], "quotes@callmitch.net")
-        self.assertEqual(lead["phone"], "(614) 221-7007")
-        self.assertEqual(lead["biz_address"], "1180 W Broad St, Columbus, OH 43222")
-        self.assertEqual(lead["biz_category"], "Auto insurance agency")
-        self.assertEqual(lead["company_domain"], "affordablemitch.com")
-        self.assertEqual(lead["source"], "apify")
-        # No person data available from Google Maps — must stay blank, not fabricated.
-        self.assertEqual(lead["name"], "")
-        self.assertEqual(lead["title"], "")
-        # Raw fields preserved with a prefix, matching apollo_*/apify_* convention.
-        self.assertEqual(lead["google_maps_rating"], 4.8)
-        self.assertEqual(lead["google_maps_reviewsCount"], 593)
-
-    @patch("requests.get")
-    @patch("requests.post")
-    def test_scrape_apify_dispatches_to_google_maps_when_configured(self, mock_post, mock_get):
-        mock_post_resp = MagicMock()
-        mock_post_resp.json.return_value = {"data": {"defaultDatasetId": "ds1"}}
-        mock_post.return_value = mock_post_resp
-        mock_get_resp = MagicMock()
-        mock_get_resp.json.return_value = [[{"name": "Acme Insurance", "email": "info@acme.com", "emails": ["info@acme.com"]}]]
-        mock_get.return_value = mock_get_resp
-
-        icp = {"industry_intelligence": {"primary_industry": "Insurance"}, "geography_intelligence": {"countries": ["Ohio"]}}
-        with patch.dict(os.environ, {"APIFY_API_TOKEN": "test_token", "APIFY_ACTOR_ID": "nourishing_courier/google-maps-lead-scraper"}):
-            leads = pl.scrape_apify(icp, max_leads=10)
-
-        self.assertEqual(len(leads), 1)
-        self.assertEqual(leads[0]["company"], "Acme Insurance")
-        _, kwargs = mock_post.call_args
-        self.assertIn("searchQueries", kwargs["json"])
-        self.assertNotIn("jobTitles", kwargs["json"])
-
-    @patch("requests.get")
-    @patch("requests.post")
-    def test_scrape_apify_actor_override_takes_priority_over_env_var(self, mock_post, mock_get):
-        mock_post_resp = MagicMock()
-        mock_post_resp.json.return_value = {"data": {"defaultDatasetId": "ds1"}}
-        mock_post.return_value = mock_post_resp
-        mock_get_resp = MagicMock()
-        mock_get_resp.json.return_value = [[{"name": "Acme Insurance", "email": "info@acme.com", "emails": ["info@acme.com"]}]]
-        mock_get.return_value = mock_get_resp
-
-        icp = {"industry_intelligence": {"primary_industry": "Insurance"}, "geography_intelligence": {"countries": ["Ohio"]}}
-        # Env var says crawlerbros, but the per-call override should win.
-        with patch.dict(os.environ, {"APIFY_API_TOKEN": "test_token", "APIFY_ACTOR_ID": "crawlerbros/lead-finder"}):
-            leads = pl.scrape_apify(icp, max_leads=10, actor_override="nourishing_courier/google-maps-lead-scraper")
-
-        self.assertEqual(leads[0]["company"], "Acme Insurance")
-        _, kwargs = mock_post.call_args
-        self.assertIn("searchQueries", kwargs["json"])
-
-    def test_run_lead_sources_threads_apify_actor_override(self):
-        icp = _icp_with_title("CIO")
-        with patch("pipeline.scrape_apollo", return_value=[]), \
-             patch("pipeline.scrape_apify", return_value=[]) as mock_apify, \
-             patch("pipeline.scrape_explorium", return_value=[]):
-            pl.run_lead_sources(
-                icp, page=1, profile="balanced", enable_explorium=True,
-                apify_actor_override="nourishing_courier/google-maps-lead-scraper",
-                target=25, max_pages=10,
-            )
-        mock_apify.assert_called_once_with(
-            icp, max_leads=50, actor_override="nourishing_courier/google-maps-lead-scraper", company_names=None
-        )
+    def test_validate_locations_treats_ordinary_city_as_recognized(self):
+        # No bounded city list exists — an unlisted city name gets the
+        # benefit of the doubt rather than a false-positive warning.
+        result = pl.validate_locations(["Austin"])
+        self.assertIn("Austin", result["recognized"])
+        self.assertEqual(result["unrecognized"], [])
 
     # ── CSV Structure Mapper ─────────────────────────────────────────────────
     # A standalone personal utility, unrelated to lead generation: maps an
@@ -1584,10 +1187,311 @@ class TestPipeline(unittest.TestCase):
                           "Hidden Exact Tech", "Hidden Close Tech", "Hidden Broad Tech"):
             self.assertIn(expected, all_tech)
 
+    # ── pipeline/bi_accessors.py — generic utilities + simple accessors ─────
+
+    def test_safe_list_filters_falsy_and_stringifies(self):
+        self.assertEqual(pl._safe_list(["A", "", None, "B", 0]), ["A", "B"])
+        self.assertEqual(pl._safe_list(None), [])
+        self.assertEqual(pl._safe_list("solo"), ["solo"])
+        self.assertEqual(pl._safe_list(" padded "), ["padded"])
+
+    def test_dedupe_list_is_case_insensitive_and_order_preserving(self):
+        self.assertEqual(pl._dedupe_list(["Acme", "acme", "Beta", " Acme "]), ["Acme", "Beta"])
+        self.assertEqual(pl._dedupe_list([]), [])
+
+    def test_join_list_str(self):
+        self.assertEqual(pl._join_list_str(["A", "", "B"]), "A, B")
+        self.assertEqual(pl._join_list_str(None), "")
+        self.assertEqual(pl._join_list_str("scalar"), "scalar")
+
+    def test_normalize_domain_strips_protocol_www_path_port(self):
+        self.assertEqual(pl.normalize_domain("https://www.Acme.com/about"), "acme.com")
+        self.assertEqual(pl.normalize_domain("acme.com"), "acme.com")
+        self.assertEqual(pl.normalize_domain("http://acme.com:8080/path"), "acme.com")
+        self.assertEqual(pl.normalize_domain(""), "")
+        self.assertEqual(pl.normalize_domain(None), "")
+
+    def test_to_number_coerces_common_gemini_formats(self):
+        self.assertEqual(pl._to_number("50"), 50.0)
+        self.assertEqual(pl._to_number("$1,200"), 1200.0)
+        self.assertEqual(pl._to_number(50), 50.0)
+        self.assertIsNone(pl._to_number(None))
+        self.assertIsNone(pl._to_number("not a number"))
+
+    def test_clean_search_term_cuts_at_first_paren_or_comma(self):
+        self.assertEqual(pl._clean_search_term("Duck Creek (Policy, Billing, Claims)"), "Duck Creek")
+        self.assertEqual(pl._clean_search_term("Duck Creek Technologies"), "Duck Creek Technologies")
+        self.assertEqual(pl._clean_search_term("Acme, Inc."), "Acme")
+
+    def test_clean_geography_list_strips_parentheticals_and_dedupes(self):
+        result = pl._clean_geography_list(["United States (Eastern Time Zone cities)", "Germany", "united states  "])
+        self.assertEqual(result, ["United States", "Germany"])
+
+    def test_bi_negative_keywords_flattens_all_exclusion_sources(self):
+        icp = {
+            "industry_intelligence": {"exclude_industries": ["Retail"]},
+            "geography_intelligence": {"excluded_locations": ["Russia"]},
+            "search_intelligence": {"negative_keywords": ["staffing agency"]},
+        }
+        self.assertEqual(pl._bi_negative_keywords(icp), ["Retail", "Russia", "staffing agency"])
+        self.assertEqual(pl._bi_negative_keywords({}), [])
+
+    def test_bi_size_range_and_revenue_range_coerce_to_numbers(self):
+        icp = {"company_intelligence": {
+            "company_size_min": "50", "company_size_max": "200",
+            "revenue_min": "$1,000,000", "revenue_max": None,
+        }}
+        self.assertEqual(pl._bi_size_range(icp), (50.0, 200.0))
+        self.assertEqual(pl._bi_revenue_range(icp), (1_000_000.0, None))
+        self.assertEqual(pl._bi_size_range({}), (None, None))
+
+    def test_bi_company_stage_and_scoring_and_industry_accessors(self):
+        icp = {
+            "company_intelligence": {"company_stage": ["Series B"]},
+            "lead_scoring": [{"signal": "hiring", "weight": 2}],
+            "industry_intelligence": {"adjacent_industries": ["Fintech"]},
+            "technology_intelligence": {"competing_products": ["Guidewire"]},
+            "buying_committee_intelligence": {"departments": ["Sales"], "seniority": ["VP"]},
+        }
+        self.assertEqual(pl._bi_company_stage(icp), ["Series B"])
+        self.assertEqual(pl._bi_lead_scoring(icp), [{"signal": "hiring", "weight": 2}])
+        self.assertEqual(pl._bi_adjacent_industries(icp), ["Fintech"])
+        self.assertEqual(pl._bi_competing_products(icp), ["Guidewire"])
+        self.assertEqual(pl._bi_departments(icp), ["Sales"])
+        self.assertEqual(pl._bi_seniority(icp), ["VP"])
+        self.assertEqual(pl._bi_lead_scoring({}), [])
+
+    # ── pipeline/export.py — bounce rate must reflect the whole verified
+    # pool, not the curated sample (select_sample() hard-disqualifies every
+    # "invalid" lead from ever reaching `sample`, so a sample-scoped count
+    # is always 0% regardless of the run's real bounce rate) ────────────────
+
+    def test_export_csv_bounce_rate_is_pool_wide_when_invalid_count_given(self):
+        # `sample` deliberately has zero invalid leads (as select_sample()
+        # guarantees in real runs) — only invalid_count carries the signal.
+        sample = [{"email": "a@x.com", "_verification_status": "valid"}]
+        with tempfile.TemporaryDirectory() as tmp:
+            _, report = pl.export_csv(
+                sample=sample, all_leads_raw=10, all_leads_deduped=8,
+                all_leads_verified=4, output_dir=tmp, invalid_count=2,
+            )
+        self.assertIn("Bounce rate", report)
+        self.assertIn("50.0%", report)  # 2 invalid / 4 verified
+
+    def test_export_csv_bounce_rate_falls_back_to_sample_scoped_without_invalid_count(self):
+        sample = [{"email": "a@x.com", "_verification_status": "catch-all"}]
+        with tempfile.TemporaryDirectory() as tmp:
+            _, report = pl.export_csv(
+                sample=sample, all_leads_raw=10, all_leads_deduped=8,
+                all_leads_verified=4, output_dir=tmp,
+            )
+        self.assertIn("Bounce rate (sample)", report)
+        self.assertIn("100.0%", report)  # 1/1 sample leads are catch-all
+
     def test_extract_verifiable_claims_uses_canonical_confirmed_tier(self):
         icp = {"technology_intelligence": {"confirmed_technologies": ["Duck Creek Technologies (Policy, Billing)"]}}
         claims = pl._extract_verifiable_claims(icp)
         self.assertEqual(claims["technology"], "Duck Creek Technologies")
+
+    # ── Stage 2 — Search Planner (pipeline/search_planner.py) ────────────────
+
+    def test_sanitize_search_plan_drops_invalid_enum_values(self):
+        fallback = pl._fallback_search_plan({})
+        raw = {
+            "industry_candidates": [
+                {"value": "insurance", "confidence": 90},
+                {"value": "not a real enum value", "confidence": 80},
+            ],
+            "high_priority_keywords": ["hospital bed manufacturer", "ICU bed"],
+            "secondary_keywords": ["healthcare furniture"],
+            "negative_keywords": ["hospital", "jobs"],
+            "company_type_terms": ["manufacturer"],
+            "confidence": 85,
+            "reasoning": "test",
+        }
+        plan = pl._sanitize_search_plan(raw, fallback)
+        self.assertEqual(plan["industry_candidates"], [{"value": "insurance", "confidence": 90.0}])
+        self.assertEqual(plan["high_priority_keywords"], ["hospital bed manufacturer", "ICU bed"])
+        self.assertEqual(plan["negative_keywords"], ["hospital", "jobs"])
+        self.assertEqual(plan["confidence"], 85.0)
+
+    def test_sanitize_search_plan_falls_back_when_all_industries_invalid(self):
+        fallback = pl._fallback_search_plan({"industry_intelligence": {"primary_industry": "Insurance"}})
+        raw = {"industry_candidates": [{"value": "not real", "confidence": 90}]}
+        plan = pl._sanitize_search_plan(raw, fallback)
+        # No valid enum survivor - falls back to the rule-based plan's
+        # industry_candidates rather than sending nothing.
+        self.assertEqual(plan["industry_candidates"], fallback["industry_candidates"])
+
+    def test_sanitize_search_plan_handles_malformed_response(self):
+        fallback = pl._fallback_search_plan({})
+        self.assertEqual(pl._sanitize_search_plan("not a dict", fallback), fallback)
+        self.assertEqual(pl._sanitize_search_plan(None, fallback), fallback)
+
+    def test_fallback_search_plan_reuses_existing_enum_matcher(self):
+        icp = {"industry_intelligence": {"primary_industry": "Insurance"}}
+        plan = pl._fallback_search_plan(icp)
+        self.assertEqual(plan["industry_candidates"], [{"value": "insurance", "confidence": 50.0}])
+        self.assertEqual(plan["confidence"], 40.0)
+
+    @patch("pipeline._cache_search_plan")
+    @patch("pipeline._get_cached_search_plan", return_value=None)
+    def test_build_search_plan_falls_back_without_api_key(self, mock_cache_read, mock_cache_write):
+        with patch.object(pl, "GEMINI_API_KEY", ""):
+            icp = {"industry_intelligence": {"primary_industry": "Insurance"}}
+            plan = pl.build_search_plan(icp)
+        self.assertEqual(plan["industry_candidates"], [{"value": "insurance", "confidence": 50.0}])
+        mock_cache_write.assert_not_called()
+
+    @patch("google.genai.Client")
+    @patch("pipeline._cache_search_plan")
+    @patch("pipeline._get_cached_search_plan", return_value=None)
+    def test_build_search_plan_uses_gemini_and_caches(self, mock_cache_read, mock_cache_write, mock_client_cls):
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+        mock_response = MagicMock()
+        mock_response.text = json.dumps({
+            "industry_candidates": [{"value": "medical devices", "confidence": 88}],
+            "high_priority_keywords": ["hospital bed manufacturer", "ICU bed"],
+            "secondary_keywords": ["healthcare furniture"],
+            "negative_keywords": ["hospital", "jobs", "used"],
+            "company_type_terms": ["manufacturer"],
+            "confidence": 90,
+            "reasoning": "Hospital beds map best to medical devices.",
+        })
+        mock_client.models.generate_content.return_value = mock_response
+
+        icp = {"industry_intelligence": {"primary_industry": "Hospital Bed Manufacturing"}}
+        with patch.object(pl, "GEMINI_API_KEY", "test_key"):
+            plan = pl.build_search_plan(icp)
+
+        self.assertEqual(plan["industry_candidates"], [{"value": "medical devices", "confidence": 88.0}])
+        self.assertIn("hospital bed manufacturer", plan["high_priority_keywords"])
+        mock_cache_write.assert_called_once()
+
+    def test_build_leads_finder_input_uses_search_plan_when_supplied(self):
+        icp = {"industry_intelligence": {"primary_industry": "Hospital Bed Manufacturing"}}
+        search_plan = {
+            "industry_candidates": [{"value": "medical devices", "confidence": 90.0}],
+            "high_priority_keywords": ["hospital bed manufacturer", "ICU bed"],
+            "secondary_keywords": ["healthcare furniture"],
+            "negative_keywords": ["hospital"],
+            "company_type_terms": ["manufacturer"],
+            "confidence": 90.0,
+        }
+        run_input = pl._build_leads_finder_input(icp, max_leads=25, search_plan=search_plan)
+        self.assertEqual(run_input["company_industry"], ["medical devices"])
+        self.assertIn("hospital bed manufacturer", run_input["company_keywords"])
+        self.assertIn("manufacturer", run_input["company_keywords"])
+        # negative_keywords never reach the actor request - see
+        # _apply_negative_keywords(), applied client-side in scrape_apify().
+        self.assertNotIn("company_not_keywords", run_input)
+
+    def test_build_leads_finder_input_ignores_hallucinated_search_plan_industry(self):
+        icp = {}
+        search_plan = {"industry_candidates": [{"value": "not a real enum value", "confidence": 90.0}]}
+        run_input = pl._build_leads_finder_input(icp, max_leads=25, search_plan=search_plan)
+        self.assertNotIn("company_industry", run_input)
+
+    def test_build_leads_finder_input_none_search_plan_preserves_old_behavior(self):
+        # Same assertions as test_build_leads_finder_input_maps_icp_fields -
+        # search_plan=None must be indistinguishable from the pre-Search-
+        # Planner code path.
+        icp = {"industry_intelligence": {"primary_industry": "Insurance"}}
+        run_input = pl._build_leads_finder_input(icp, max_leads=25, search_plan=None)
+        self.assertEqual(run_input["company_industry"], ["insurance"])
+
+    def test_apply_negative_keywords_filters_matching_leads(self):
+        leads = [
+            {"company": "General Hospital", "title": "CFO", "biz_description": "A hospital."},
+            {"company": "Acme Bed Manufacturing", "title": "VP Sales", "biz_description": "Makes hospital beds."},
+        ]
+        filtered = pl._apply_negative_keywords(leads, ["hospital"])
+        # Both leads mention "hospital" in their text (the second one
+        # describes ITS PRODUCT, not itself, as a hospital) - this
+        # documents the current literal-substring behavior rather than
+        # asserting it's perfectly precise.
+        self.assertEqual(len(filtered), 0)
+
+    def test_apply_negative_keywords_noop_when_empty(self):
+        leads = [{"company": "Acme", "title": "CFO"}]
+        self.assertEqual(pl._apply_negative_keywords(leads, []), leads)
+        self.assertEqual(pl._apply_negative_keywords(leads, None), leads)
+
+    # ── Planner History (pipeline/search_planner.py) ─────────────────────────
+
+    def test_sample_outcome_metrics_computes_average_and_fill_rate(self):
+        sample = [{"_composite_score": 90.0}, {"_composite_score": 70.0}]
+        avg, fill_rate = pl._sample_outcome_metrics(sample, target=4)
+        self.assertEqual(avg, 80.0)
+        self.assertEqual(fill_rate, 0.5)
+
+    def test_sample_outcome_metrics_empty_sample(self):
+        self.assertEqual(pl._sample_outcome_metrics([], target=10), (0.0, 0.0))
+
+    def test_compute_success_rates_requires_minimum_runs(self):
+        # Only 2 rows — below _MIN_HISTORY_RUNS_FOR_SIGNAL (3) — must be
+        # omitted rather than shown as a confident (if noisy) rate.
+        rows = [("medical devices", 90.0, 1.0), ("medical devices", 85.0, 0.9)]
+        self.assertEqual(pl._compute_success_rates(rows), {})
+
+    def test_compute_success_rates_aggregates_by_industry(self):
+        rows = [
+            ("medical devices", 90.0, 1.0),
+            ("medical devices", 85.0, 0.9),
+            ("medical devices", 40.0, 0.9),   # fails the composite-score bar
+            ("machinery", 30.0, 0.5),
+            ("machinery", 20.0, 0.4),
+            ("machinery", 25.0, 0.3),
+        ]
+        result = pl._compute_success_rates(rows)
+        self.assertEqual(result["medical devices"]["runs"], 3)
+        self.assertAlmostEqual(result["medical devices"]["success_rate"], 66.7, delta=0.1)
+        self.assertEqual(result["machinery"]["runs"], 3)
+        self.assertEqual(result["machinery"]["success_rate"], 0.0)
+
+    def test_record_and_read_search_plan_outcome_round_trip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            history_path = os.path.join(tmp, "history.db")
+            with patch("pipeline.search_planner._SEARCH_PLAN_HISTORY_PATH", history_path):
+                search_plan = {"industry_candidates": [
+                    {"value": "medical devices", "confidence": 90.0},
+                    {"value": "machinery", "confidence": 40.0},
+                ]}
+                good_sample = [{"_composite_score": 90.0}, {"_composite_score": 85.0}]
+                for _ in range(3):
+                    pl.record_search_plan_outcome(search_plan, good_sample, target=2)
+                rates = pl.get_industry_success_rates()
+
+        self.assertEqual(rates["medical devices"]["runs"], 3)
+        self.assertEqual(rates["medical devices"]["success_rate"], 100.0)
+        # Both candidates in a run's plan get a logged row — the actor was
+        # given both, so both share credit for the outcome.
+        self.assertEqual(rates["machinery"]["runs"], 3)
+
+    def test_record_search_plan_outcome_noop_without_industry_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            history_path = os.path.join(tmp, "history.db")
+            with patch("pipeline.search_planner._SEARCH_PLAN_HISTORY_PATH", history_path):
+                pl.record_search_plan_outcome({}, [{"_composite_score": 90.0}], target=1)
+                self.assertEqual(pl.get_industry_success_rates(), {})
+
+    def test_search_planner_prompt_includes_history_when_present(self):
+        icp = {"industry_intelligence": {"primary_industry": "Insurance"}}
+        with patch("pipeline.get_industry_success_rates", return_value={
+            "medical devices": {"runs": 12, "success_rate": 95.0},
+            "machinery": {"runs": 5, "success_rate": 18.0},
+        }):
+            prompt = pl._search_planner_prompt(icp)
+        self.assertIn("HISTORICAL PERFORMANCE", prompt)
+        self.assertIn("medical devices", prompt)
+        self.assertIn("95.0%", prompt)
+
+    def test_search_planner_prompt_omits_history_when_absent(self):
+        icp = {"industry_intelligence": {"primary_industry": "Insurance"}}
+        with patch("pipeline.get_industry_success_rates", return_value={}):
+            prompt = pl._search_planner_prompt(icp)
+        self.assertNotIn("HISTORICAL PERFORMANCE", prompt)
 
 if __name__ == "__main__":
     unittest.main()

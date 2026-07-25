@@ -25,24 +25,20 @@ def main(
     output_dir: str = ".",
     target: int = 25,
     max_pages: int = 10,
-    enable_explorium: bool = False,
-    explorium_api_key: str = None,
 ):
     """
     Runs the full lead-generation pipeline end-to-end.
 
-    Keeps paginating Apollo (+ a single Apify run on page 1, + Explorium
-    if enabled) until `target` leads with ≥95% ZeroBounce confidence are
-    collected, or `max_pages` is exhausted.
+    Runs a single Apify (code_crafter/leads-finder) call on page 1 — it has
+    no page param — repeating dedupe/verify on that one batch until
+    `target` leads with ≥95% ZeroBounce confidence are collected, or
+    `max_pages` is exhausted.
 
     Args:
         inquiry           : Raw customer inquiry text.
         output_dir        : Directory for CSV / report output.
         target            : Number of verified leads to collect (default 25).
-        max_pages         : Maximum Apollo pages to fetch (safety cap).
-        enable_explorium  : Also scrape Explorium.ai (off by default, mirrors
-                             the Flask dashboard's default-unchecked checkbox).
-        explorium_api_key : Explorium API key override (falls back to .env).
+        max_pages         : Safety cap on pagination attempts.
     """
     pl.log.info("═" * 55)
     pl.log.info("  LEAD GENERATION PIPELINE — STARTING (target: %d verified)", target)
@@ -55,6 +51,8 @@ def main(
     verified_pool:     list[dict] = []    # accumulates qualified verified leads
     seen_emails:       set        = set() # cross-page dedup state
     seen_fingerprints: set        = set()
+    seen_linkedin_ids: set        = set()
+    seen_phones:       set        = set()
     total_raw     = 0
     total_deduped = 0
     page          = 1
@@ -72,23 +70,17 @@ def main(
         )
 
         # ── Stage 2: Scrape ───────────────────────────────────────────────────
-        apollo_leads = pl.scrape_apollo(icp, max_leads=25, page=page)
-        # Apify is expensive — run only on the first page
-        apify_leads  = pl.scrape_apify(icp, max_leads=50) if page == 1 else []
-        explorium_leads = (
-            pl.scrape_explorium(icp, max_leads=50, page=page, api_key=explorium_api_key)
-            if enable_explorium else []
-        )
-        raw_batch    = apollo_leads + apify_leads + explorium_leads
-        total_raw   += len(raw_batch)
+        # Apify is expensive — run only on the first page (no page param).
+        raw_batch  = pl.scrape_apify(icp, max_leads=50) if page == 1 else []
+        total_raw += len(raw_batch)
 
         if not raw_batch:
             pl.log.warning("Page %d returned 0 leads — stopping pagination.", page)
             break
 
         # ── Stage 3: Dedupe (cumulative across pages) ─────────────────────────
-        clean_batch, seen_emails, seen_fingerprints = pl.dedupe_leads(
-            raw_batch, seen_emails, seen_fingerprints
+        clean_batch, seen_emails, seen_fingerprints, seen_linkedin_ids, seen_phones = pl.dedupe_leads(
+            raw_batch, seen_emails, seen_fingerprints, seen_linkedin_ids, seen_phones
         )
         total_deduped += len(clean_batch)
 
@@ -126,7 +118,7 @@ def main(
     if len(sample) < target:
         pl.log.warning(
             "⚠ Collected %d/%d verified leads after %d pages. "
-            "Increase max_pages, broaden ICP, or upgrade Apollo/Apify plan.",
+            "Increase max_pages, broaden ICP, or upgrade the Apify plan.",
             len(sample), target, page - 1,
         )
     else:

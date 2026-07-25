@@ -14,33 +14,63 @@ import pipeline as pl
 bp = Blueprint("csv_mapper", __name__, url_prefix="/api/csv-mapper")
 
 
+def _decode_csv_upload(raw: bytes) -> str:
+    for encoding in ("utf-8-sig", "cp1252"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
 @bp.route("/analyze", methods=["POST"])
 def csv_mapper_analyze():
     """
     Standalone personal utility — no relation to the lead-gen pipeline.
-    Parses an uploaded CSV, suggests a mapping of its columns onto LeadFlow's
+    Parses one or more uploaded CSVs, merges them (union of headers, rows
+    concatenated), suggests a mapping of the combined columns onto LeadFlow's
     own canonical lead structure, and returns everything the client needs to
     render a preview + editable mapping table. Stateless: nothing is written
     to disk and no run is created.
     """
-    file = request.files.get("file")
-    if not file or file.filename == "":
+    files = [f for f in request.files.getlist("file") if f and f.filename]
+    if not files:
         return jsonify({"error": "no file uploaded"}), 400
-    if not file.filename.lower().endswith(".csv"):
-        return jsonify({"error": "Unsupported file format. Please upload a .csv file"}), 400
+    bad = next((f.filename for f in files if not f.filename.lower().endswith(".csv")), None)
+    if bad:
+        return jsonify({"error": f"Unsupported file format: '{bad}'. Please upload .csv files only"}), 400
 
-    try:
-        stream = io.StringIO(file.read().decode("utf-8"), newline="")
-        reader = csv.DictReader(stream)
-        rows = list(reader)
-        headers = reader.fieldnames or []
-    except Exception as e:
-        return jsonify({"error": f"Failed to parse file: {str(e)}"}), 400
+    headers: list = []
+    seen_headers = set()
+    rows: list = []
+    for f in files:
+        text = _decode_csv_upload(f.read())
+        try:
+            stream = io.StringIO(text, newline="")
+            reader = csv.DictReader(stream)
+            file_rows = list(reader)
+            file_headers = reader.fieldnames or []
+        except Exception as e:
+            return jsonify({"error": f"Failed to parse '{f.filename}': {str(e)}"}), 400
+
+        for h in file_headers:
+            if h not in seen_headers:
+                seen_headers.add(h)
+                headers.append(h)
+        rows.extend(file_rows)
 
     if not headers:
-        return jsonify({"error": "No columns found in file"}), 400
+        return jsonify({"error": "No columns found in file(s)"}), 400
 
-    sample_row = rows[0] if rows else {}
+    # Best-available example value per header — rows[0] alone may come from a
+    # file that doesn't have every header when multiple CSVs are merged.
+    sample_row = {}
+    for h in headers:
+        for row in rows:
+            if row.get(h):
+                sample_row[h] = row[h]
+                break
+
     result = pl.suggest_csv_column_mapping(headers, sample_row)
 
     return jsonify({
@@ -51,6 +81,7 @@ def csv_mapper_analyze():
         # An ordered [key, label] list, not an object — jsonify() sorts dict
         # keys alphabetically, which would scramble the canonical column order.
         "canonical_fields": [[k, v[0]] for k, v in pl._CSV_MAPPER_FIELDS.items()],
+        "source_files": [f.filename for f in files],
     })
 
 

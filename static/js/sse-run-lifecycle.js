@@ -24,22 +24,6 @@
       }
 
       const target = parseInt(document.getElementById('targetLeads').value) || 25;
-      const max_pages = parseInt(document.getElementById('maxPages').value) || 10;
-      const enable_apollo = document.getElementById('enableApollo').checked;
-      const enable_apify = document.getElementById('enableApify').checked;
-      const enable_explorium = document.getElementById('enableExplorium').checked;
-      const explorium_api_key = document.getElementById('exploriumApiKey').value.trim();
-      const verifier_provider = document.querySelector('input[name="verifierProvider"]:checked').value;
-
-      if (!enable_apollo && !enable_apify && !enable_explorium) {
-        showAlert('warning', 'Please enable at least one scraper (Apollo, Apify, or Explorium) to search for leads.');
-        return;
-      }
-
-      if (enable_explorium && !explorium_api_key) {
-        showAlert('warning', 'Please enter your Explorium API Key to use Explorium search.');
-        return;
-      }
 
       hideAlert();
       resetUI();
@@ -67,14 +51,8 @@
           body: JSON.stringify({
             inquiry: inquiry || 'Custom Chat Run',
             target,
-            max_pages,
-            enable_apollo,
-            enable_apify,
-            enable_explorium,
-            explorium_api_key,
-            verifier_provider,
+            verifier_provider: 'gmail_bounce',
             profile: selectedSourceProfile,
-            apify_actor: getSelectedApifyActor(),
             icp: lastParsedICP
           })
         });
@@ -82,6 +60,7 @@
         if (data.error) throw new Error(data.error);
         runId = data.run_id;
         connectSSE(runId);
+        if (typeof enterProgressView === 'function') enterProgressView();
       } catch (err) {
         showAlert('error', `Failed to start run: ${err.message}`);
         resetButton();
@@ -99,11 +78,11 @@
     }
 
     async function startImportRun() {
-      const inquiry = document.getElementById('inquiry').value.trim();
-      if (!inquiry) {
-        showAlert('warning', 'Please enter a customer inquiry before running the pipeline.');
-        return;
-      }
+      // Uses its own #importInquiry field, not the AI chat's #inquiry —
+      // the two modes can't share one textarea (duplicate DOM ids), and
+      // this one is optional/for-labeling-only, since an imported run's
+      // ICP is never used to plan a search (see search-wizard.js).
+      const inquiry = document.getElementById('importInquiry').value.trim() || 'Imported Leads';
 
       const fileInput = document.getElementById('importFile');
       if (fileInput.files.length === 0) {
@@ -112,7 +91,6 @@
       }
 
       const target = parseInt(document.getElementById('targetLeads').value) || 25;
-      const verifier_provider = document.querySelector('input[name="verifierProvider"]:checked').value;
 
       hideAlert();
       resetUI();
@@ -128,7 +106,7 @@
       formData.append('inquiry', inquiry);
       formData.append('file', fileInput.files[0]);
       formData.append('target', target);
-      formData.append('verifier_provider', verifier_provider);
+      formData.append('verifier_provider', 'gmail_bounce');
 
       let runId;
       try {
@@ -140,6 +118,7 @@
         if (data.error) throw new Error(data.error);
         runId = data.run_id;
         connectSSE(runId);
+        if (typeof enterProgressView === 'function') enterProgressView();
       } catch (err) {
         showAlert('error', `Failed to start import run: ${err.message}`);
         resetButton();
@@ -192,12 +171,8 @@
       const duplicatesCount = totalRaw > dedupedCount ? (totalRaw - dedupedCount) : 0;
       animateCount('statDeduped', duplicatesCount);
 
-      if (lastStats.apollo !== undefined || lastStats.apify !== undefined || lastStats.explorium !== undefined) {
-        const apollo = lastStats.apollo || 0;
-        const apify = lastStats.apify || 0;
-        const exp = lastStats.explorium || 0;
-        document.getElementById('statSources').textContent =
-          `Apollo: ${apollo}  ·  Apify: ${apify}  ·  Explorium: ${exp}`;
+      if (lastStats.apify !== undefined) {
+        document.getElementById('statSources').textContent = `Apify: ${lastStats.apify || 0}`;
       }
     }
 

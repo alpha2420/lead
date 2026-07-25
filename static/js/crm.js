@@ -111,14 +111,14 @@
     }
 
     function statusBadge(status) {
-      const map = { valid:'badge-valid', invalid:'badge-invalid', 'catch-all':'badge-catchall' };
-      const labels = { valid:'Verified', invalid:'Invalid', 'catch-all':'Pending' };
+      const map = { valid:'badge-valid', invalid:'badge-invalid', 'catch-all':'badge-catchall', unverified:'badge-other', unknown:'badge-other' };
+      const labels = { valid:'Verified', invalid:'Invalid', 'catch-all':'Pending', unverified:'Unverified', unknown:'Unknown' };
       const cls = map[status] || 'badge-other';
       const label = labels[status] || status || 'Unknown';
       return `<span class="badge ${cls}">${label}</span>`;
     }
     function sourceBadge(src) {
-      const cls = src === 'apollo' ? 'badge-apollo' : src === 'apify' ? 'badge-apify' : src === 'explorium' ? 'badge-explorium' : 'badge-other';
+      const cls = src === 'apify' ? 'badge-apify' : 'badge-other';
       return `<span class="badge ${cls}">${src||'—'}</span>`;
     }
 
@@ -344,7 +344,7 @@
       const srcBadge = document.getElementById('drawerSourceBadge');
       if (srcBadge) {
         srcBadge.textContent = lead.source || 'imported';
-        srcBadge.className = 'drawer-source-badge ' + (lead.source === 'apollo' ? 'badge-apollo' : lead.source === 'apify' ? 'badge-apify' : lead.source === 'explorium' ? 'badge-explorium' : 'badge-other');
+        srcBadge.className = 'drawer-source-badge ' + (lead.source === 'apify' ? 'badge-apify' : 'badge-other');
       }
       
       // Status drop down

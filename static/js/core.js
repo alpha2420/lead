@@ -3,8 +3,8 @@
     let sortKey  = null;
     let sortDir  = 1;
     let selectedLeadKeys = new Set();
-    let chartSource = null;
     let chartVerify = null;
+    let chartOutcomeDonut = null;
     let currentRunId = null;
     let pipelineStartTime = null;
     let pipelineTimerInterval = null;
@@ -57,17 +57,19 @@
 
     const STAGES = [
       { id: 1, label: "Generate\nICP" },
-      { id: 2, label: "Discover\nCompanies" },
-      { id: 3, label: "Validate\nCompanies" },
-      { id: 4, label: "Search\nLeads" },
-      { id: 5, label: "Dedupe\n& Clean" },
-      { id: 6, label: "LinkedIn\nVerify" },
-      { id: 7, label: "Domain\nMatch" },
-      { id: 8, label: "Email\nWaterfall" },
-      { id: 9, label: "Composite\nScore" },
-      { id: 10, label: "Verify\nClaims" },
-      { id: 11, label: "Org\nEnrichment" },
-      { id: 12, label: "Export\nCSV" },
+      { id: 2, label: "Plan\nSearch" },
+      { id: 3, label: "Discover\nCompanies" },
+      { id: 4, label: "Validate\nCompanies" },
+      { id: 5, label: "Search\nLeads" },
+      { id: 6, label: "Dedupe\n& Clean" },
+      { id: 7, label: "LinkedIn\nVerify" },
+      { id: 8, label: "Domain\nMatch" },
+      { id: 9, label: "Email\nWaterfall" },
+      { id: 10, label: "Composite\nScore" },
+      { id: 11, label: "Verify\nClaims" },
+      { id: 12, label: "Org\nEnrichment" },
+      { id: 13, label: "AI\nRerank" },
+      { id: 14, label: "Export\nCSV" },
     ];
 
     // ── Init ───────────────────────────────────────────────────────────────────
@@ -83,7 +85,7 @@
     }
 
     document.addEventListener('DOMContentLoaded', () => {
-      // Initialize Theme — light by default (Apollo-style), dark is opt-in
+      // Initialize Theme — light by default, dark is opt-in
       const savedTheme = localStorage.getItem('theme') || 'light';
       const isDark = savedTheme === 'dark';
       if (isDark) {
@@ -98,6 +100,12 @@
       initCharts();
       updateChartThemeColors(!isDark);
       checkHealth();
+      // tab-home is the default active tab (see templates/index.html) —
+      // its static HTML classes already reflect that, but running the real
+      // switchTab() here (rather than relying on those classes alone) also
+      // applies the persistent-stats-bar/banner hide logic and fires
+      // loadHomeDashboard(), so first load behaves identically to a click.
+      switchTab('tab-home');
       loadHistory(); // pre-load history
       renderManualSearchTags();
       initDrawerWidth();
@@ -107,24 +115,26 @@
     });
 
     function updateChartThemeColors(isLight) {
-      if (!chartVerify || !chartSource) return;
-      
       const textColor = isLight ? '#52525b' : '#9d9da8';
       const gridColor = isLight ? 'rgba(9,9,11,0.06)' : 'rgba(255,255,255,0.05)';
-      
-      chartVerify.options.plugins.legend.labels.color = textColor;
-      if (chartVerify.options.scales.x) {
-        chartVerify.options.scales.x.ticks.color = isLight ? '#52525b' : '#63636e';
-        chartVerify.options.scales.x.grid.color = gridColor;
-      }
-      if (chartVerify.options.scales.y) {
-        chartVerify.options.scales.y.ticks.color = isLight ? '#52525b' : '#63636e';
-        chartVerify.options.scales.y.grid.color = gridColor;
-      }
-      chartVerify.update();
 
-      chartSource.options.plugins.legend.labels.color = textColor;
-      chartSource.update();
+      if (chartVerify) {
+        chartVerify.options.plugins.legend.labels.color = textColor;
+        if (chartVerify.options.scales.x) {
+          chartVerify.options.scales.x.ticks.color = isLight ? '#52525b' : '#63636e';
+          chartVerify.options.scales.x.grid.color = gridColor;
+        }
+        if (chartVerify.options.scales.y) {
+          chartVerify.options.scales.y.ticks.color = isLight ? '#52525b' : '#63636e';
+          chartVerify.options.scales.y.grid.color = gridColor;
+        }
+        chartVerify.update();
+      }
+
+      if (chartOutcomeDonut) {
+        chartOutcomeDonut.options.plugins.legend.labels.color = textColor;
+        chartOutcomeDonut.update();
+      }
     }
 
     // ── API Status Dropdown Toggle ─────────────────────────────────────────────
@@ -167,7 +177,7 @@
       if (btn) btn.classList.add('spinning');
 
       // Reset all cards to "checking"
-      ['gemini','apollo','apify','explorium','zerobounce'].forEach(api => {
+      ['gemini','apify','zerobounce'].forEach(api => {
         const dot = document.getElementById(`hdot-${api}`);
         const msg = document.getElementById(`hmsg-${api}`);
         const lat = document.getElementById(`hlat-${api}`);
@@ -220,7 +230,7 @@
         if (el) el.textContent = `Last checked ${now.toLocaleTimeString()}`;
 
       } catch (err) {
-        ['gemini','apollo','apify','explorium','zerobounce'].forEach(api => {
+        ['gemini','apify','zerobounce'].forEach(api => {
           const dot = document.getElementById(`hdot-${api}`);
           const msg = document.getElementById(`hmsg-${api}`);
           if (dot) dot.className = 'health-dot error';
@@ -235,8 +245,8 @@
 
     // "Validate ICP" is a frontend-only checkpoint row (no backend stage
     // number of its own — see pipelineStepValidateICP) that visually proves
-    // the finalized ICP is locked before Search Leads calls Apollo/Apify/
-    // Explorium. It's driven by two real signals instead of a stage number:
+    // the finalized ICP is locked before Search Leads calls Apify. It's
+    // driven by two real signals instead of a stage number:
     // the SSE 'icp' event (-> active) and the Search Leads stage starting
     // (-> done). 'pending' | 'active' | 'done'.
     let icpValidationState = 'pending';

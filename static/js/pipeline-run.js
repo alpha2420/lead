@@ -30,6 +30,10 @@
           markICPGenerated();
         }
 
+        if (msg.type === 'search_plan') {
+          renderSearchPlan(msg.data);
+        }
+
         if (msg.type === 'stats') {
           Object.assign(accumStats, msg);
           updateStatCards(accumStats);
@@ -60,10 +64,11 @@
           updateStatCards(msg.data.stats);
           const pages = msg.data.stats.pages || 1;
           if (msg.data.stats.sample < 25) {
-            showAlert('warning', `⚠ Only ${msg.data.stats.sample} verified leads collected after ${pages} page(s). Try broadening your ICP or upgrading your Apollo/Apify plan.`);
+            showAlert('warning', `⚠ Only ${msg.data.stats.sample} verified leads collected after ${pages} page(s). Try broadening your ICP or upgrading your Apify plan.`);
           }
           appendLog('INFO', `✅ Pipeline complete — ${allLeads.length} verified leads exported (${pages} page(s) scraped).`);
           loadHistory();
+          if (typeof onRunComplete === 'function') onRunComplete(msg.data.stats);
         }
 
         if (msg.type === 'error') {
@@ -72,6 +77,7 @@
           resetButton();
           showAlert('error', `Pipeline error: ${msg.message}`);
           appendLog('ERROR', msg.message);
+          if (typeof onRunError === 'function') onRunError(msg.message);
           es.close();
         }
       };
@@ -105,21 +111,6 @@
       const shouldOpen = forceOpen === true ? true : forceOpen === false ? false : !content.classList.contains('show');
       content.classList.toggle('show', shouldOpen);
       icon.style.transform = shouldOpen ? 'rotate(0deg)' : 'rotate(-90deg)';
-    }
-
-    function toggleExploriumKeyInput() {
-      const enableExplorium = document.getElementById('enableExplorium').checked;
-      document.getElementById('exploriumKeyContainer').style.display = enableExplorium ? 'block' : 'none';
-    }
-
-    function toggleApifyActorInput() {
-      const enableApify = document.getElementById('enableApify').checked;
-      document.getElementById('apifyActorContainer').style.display = enableApify ? 'block' : 'none';
-    }
-
-    function getSelectedApifyActor() {
-      const el = document.getElementById('apifyActorSelect');
-      return (el && el.value) ? el.value : null;
     }
 
     function setTargetLeads(value) {

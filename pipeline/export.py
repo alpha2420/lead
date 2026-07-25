@@ -26,6 +26,7 @@ def export_csv(
     all_leads_deduped: int,
     all_leads_verified: int,
     output_dir: str = ".",
+    invalid_count: Optional[int] = None,
 ) -> tuple[str, str]:
     """
     Writes the sample to a timestamped CSV file and prints a summary report.
@@ -64,6 +65,8 @@ def export_csv(
         "_composite_score":      "Composite Score",
         "_claim_verification_signal":   "Claim Verification",
         "_claim_verification_evidence": "Claim Evidence",
+        "_rerank_score":         "AI Rerank Score",
+        "_rerank_rationale":     "AI Rerank Rationale",
         "source":                "Source",
     }
 
@@ -95,11 +98,21 @@ def export_csv(
             writer.writerow(row)
 
     # ── Summary report ────────────────────────────────────────────────────────
-    bounced = sum(
-        1 for l in sample
-        if l.get("_verification_status") in {"invalid", "catch-all", "spamtrap"}
-    )
-    bounce_rate = (bounced / len(sample) * 100) if sample else 0.0
+    # Pool-wide when the caller tracked it (invalid leads are hard-disqualified
+    # from `sample` by pl.select_sample(), so a sample-scoped count is always
+    # ~0 regardless of the run's real bounce rate). Falls back to the old
+    # sample-scoped estimate only for callers that don't track invalid_count
+    # (e.g. pipeline/cli.py).
+    if invalid_count is not None:
+        bounce_label = "Bounce rate"
+        bounce_rate = (invalid_count / all_leads_verified * 100) if all_leads_verified else 0.0
+    else:
+        bounce_label = "Bounce rate (sample)"
+        bounced = sum(
+            1 for l in sample
+            if l.get("_verification_status") in {"invalid", "catch-all", "spamtrap"}
+        )
+        bounce_rate = (bounced / len(sample) * 100) if sample else 0.0
 
     report = (
         "\n"
@@ -110,7 +123,7 @@ def export_csv(
         f"  After deduplication   : {all_leads_deduped}\n"
         f"  Passed email verify   : {all_leads_verified}\n"
         f"  Final sample size     : {len(sample)}\n"
-        f"  Bounce rate (sample)  : {bounce_rate:.1f}%\n"
+        f"  {bounce_label:<22}: {bounce_rate:.1f}%\n"
         f"  Output CSV            : {csv_path}\n"
         "──────────────────────────────────────────\n"
     )

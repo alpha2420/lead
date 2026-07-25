@@ -1,17 +1,24 @@
 """
 Lead Generation Sample Delivery Pipeline
 =========================================
-Stages:
-  1. parse_inquiry              → AI-powered ICP extraction via Gemini
-  2. scrape_apollo/apify/explorium → multi-source lead scraping
-  3. dedupe_leads                → Deduplication + standardization
-  4. linkedin_cross_verify_leads → LinkedIn current-employer/title check (Bright Data)
-  5. domain_match_leads          → Email domain vs. company website
-  6. verify_emails                → DNS/SMTP waterfall or ZeroBounce
-  7. compute_composite_scores + select_sample → blended scoring + best-N selection
-  8. verify_claims_for_leads      → dynamic technology/industry claim verification (final sample only)
-  9. enrich_organizations_for_leads → Apollo Organization Enrichment backfill (final sample only)
-  10. export_csv                  → CSV output + summary report
+Stages (matches app/pipeline_runner.py's push_stage() numbering — the
+absolute stage numbers the frontend's sidebar renders):
+  1. parse_inquiry                 → AI-powered ICP extraction via Gemini
+  2. build_search_plan              → Search Planner: translates the ICP into a search
+                                       strategy tailored to leads-finder's real constraints
+                                       (fixed industry enum, literal keyword filters)
+  3. discover_companies             → Gemini + Apify google-search-scraper company discovery
+  4. validate_companies             → rule pass + capped AI fact-check on candidate companies
+  5. scrape_apify                   → Apify (code_crafter/leads-finder) lead scraping
+  6. dedupe_leads                   → Deduplication + standardization
+  7. linkedin_cross_verify_leads    → LinkedIn current-employer/title check (Bright Data)
+  8. domain_match_leads             → Email domain vs. company website
+  9. verify_emails                  → DNS/SMTP waterfall, ZeroBounce, or gmail_bounce
+  10. compute_composite_scores + select_sample → blended scoring + best-N selection
+  11. verify_claims_for_leads       → dynamic technology/industry claim verification (final sample only)
+  12. enrich_organizations_for_leads → Organization Enrichment backfill (final sample only; dormant — no provider configured)
+  13. rerank_final_sample           → final Gemini holistic re-sort (reorder-only)
+  14. export_csv                    → CSV output + summary report
 
 This module owns process-wide setup (dotenv, logging, API key globals) —
 every other submodule in this package imports `pipeline as pl` and reads
@@ -86,12 +93,24 @@ def _debug_dump_path(basename: str) -> str:
 
 # API keys loaded from .env
 GEMINI_API_KEY     = os.getenv("GEMINI_API_KEY")
-APOLLO_API_KEY     = os.getenv("APOLLO_API_KEY")
 APIFY_API_TOKEN    = os.getenv("APIFY_API_TOKEN")
 ZEROBOUNCE_API_KEY = os.getenv("ZEROBOUNCE_API_KEY")
-EXPLORIUM_API_KEY  = os.getenv("EXPLORIUM_API_KEY")
 LINKEDIN_API_KEY   = os.getenv("LINKEDIN_API_KEY")
 LINKEDIN_API_URL   = os.getenv("LINKEDIN_API_URL")
 
-# Apify actor ID — replace with your real actor slug, e.g. "apify/linkedin-profile-scraper"
-APIFY_ACTOR_ID = os.getenv("APIFY_ACTOR_ID", "REPLACE_WITH_YOUR_ACTOR_ID")
+# Gmail account used by the "gmail_bounce" email verifier provider (sends a
+# real email to each lead and watches for a real bounce — see
+# pipeline/scoring.py::verify_emails_via_gmail_bounce()). GMAIL_APP_PASSWORD
+# must be a 16-character Gmail App Password (myaccount.google.com/apppasswords),
+# not the account's normal login password — Gmail requires 2FA + an app
+# password for raw SMTP/IMAP login.
+GMAIL_SENDER_ADDRESS = os.getenv("GMAIL_SENDER_ADDRESS")
+GMAIL_APP_PASSWORD   = os.getenv("GMAIL_APP_PASSWORD")
+
+# Left defined (unset) purely so org_enrichment.py's `if not pl.APOLLO_API_KEY`
+# guard keeps working — Apollo is not a supported platform in this codebase;
+# Stage 9 (Organization Enrichment) is a permanent no-op without it.
+APOLLO_API_KEY = os.getenv("APOLLO_API_KEY")
+
+# Apify actor — this pipeline's sole lead-sourcing platform.
+APIFY_ACTOR_ID = os.getenv("APIFY_ACTOR_ID", "code_crafter/leads-finder")

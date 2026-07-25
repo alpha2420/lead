@@ -28,7 +28,7 @@ def test_health(client):
     resp = client.get("/api/health")
     assert resp.status_code == 200
     data = resp.get_json()
-    assert set(["gemini", "apollo", "apify", "explorium", "zerobounce"]).issubset(data.keys())
+    assert set(["gemini", "apify", "zerobounce"]).issubset(data.keys())
 
 
 def test_run_requires_inquiry(client):
@@ -105,11 +105,6 @@ def test_generate_buyer_icp_requires_description(client):
     assert resp.status_code == 400
 
 
-def test_estimate_coverage_requires_icp(client):
-    resp = client.post("/api/estimate-coverage", json={})
-    assert resp.status_code == 400
-
-
 def test_chat_icp_requires_message(client):
     resp = client.post("/api/chat-icp", json={})
     assert resp.status_code == 400
@@ -178,3 +173,74 @@ def test_history_detail_rejects_path_traversal(client):
 def test_download_rejects_path_traversal(client):
     resp = client.get("/api/download/..%2F..%2Fetc%2Fpasswd")
     assert resp.status_code in (400, 404)
+
+
+def test_history_aggregate_smoke(client):
+    # Matches this file's existing minimal style for routes that read the
+    # real output/ dir — a real 200 + the expected top-level keys, not a
+    # controlled fixture. See test_history_aggregate_sums_across_runs below
+    # for the actual aggregation-math coverage.
+    resp = client.get("/api/history/aggregate")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert set([
+        "run_count", "total_leads", "total_verified", "total_duplicates",
+        "success_rate", "avg_runtime_seconds", "outcome_totals",
+        "recent_runs", "recent_sample",
+    ]).issubset(data.keys())
+
+
+def test_history_aggregate_empty_output_dir(client, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # no "output" dir at all here
+    resp = client.get("/api/history/aggregate")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["run_count"] == 0
+    assert data["total_leads"] == 0
+    assert data["success_rate"] == 0.0
+    assert data["avg_runtime_seconds"] is None
+    assert data["recent_runs"] == []
+    assert data["recent_sample"] == []
+
+
+def test_history_aggregate_sums_across_runs(client, tmp_path, monkeypatch):
+    import json as json_module
+
+    monkeypatch.chdir(tmp_path)
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+
+    # Older run — predates runtime_seconds entirely (must not crash the average).
+    (output_dir / "metadata_20240101_100000.json").write_text(json_module.dumps({
+        "inquiry": "Old run", "timestamp": "2024-01-01 10:00:00",
+        "csv_filename": "leads_sample_20240101_100000.csv",
+        "stats": {"raw": 10, "verified": 5, "deduped": 8, "invalid": 2, "catchall": 1, "sample": 5},
+        "sample": [{"name": "Old Lead", "status": "valid"}],
+    }))
+    # Newer run — has runtime_seconds.
+    (output_dir / "metadata_20240102_100000.json").write_text(json_module.dumps({
+        "inquiry": "New run", "timestamp": "2024-01-02 10:00:00",
+        "csv_filename": "leads_sample_20240102_100000.csv",
+        "stats": {
+            "raw": 20, "verified": 15, "deduped": 18, "invalid": 3, "catchall": 2,
+            "sample": 15, "runtime_seconds": 42.0,
+        },
+        "sample": [{"name": "New Lead", "status": "valid"}],
+    }))
+
+    resp = client.get("/api/history/aggregate")
+    assert resp.status_code == 200
+    data = resp.get_json()
+
+    assert data["run_count"] == 2
+    assert data["total_leads"] == 30       # 10 + 20
+    assert data["total_verified"] == 20    # 5 + 15
+    assert data["total_duplicates"] == 4   # (10-8) + (20-18)
+    assert data["success_rate"] == round(20 / 30 * 100, 1)
+    # Only the newer run has runtime_seconds — average is over that 1 run alone.
+    assert data["avg_runtime_seconds"] == 42.0
+    assert data["runtime_sample_size"] == 1
+    assert data["outcome_totals"] == {"valid": 20, "invalid": 5, "catchall": 3}
+    # Most recent run first, and its own sample used for the leads preview.
+    assert data["recent_runs"][0]["inquiry"] == "New run"
+    assert data["recent_sample"] == [{"name": "New Lead", "status": "valid"}]
