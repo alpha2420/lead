@@ -14,6 +14,21 @@ from .state import RunRegistry, save_run_metadata
 logger = logging.getLogger(__name__)
 
 
+class _RunCancelled(Exception):
+    """Raised internally at a checkpoint when the run's cancel flag is set —
+    not a real pipeline failure, so both thread bodies below catch it
+    separately from Exception and record status "cancelled", not "error"."""
+
+
+def _raise_if_cancelled(run_registry: RunRegistry, run_id: str):
+    """Python threads can't be killed outright, so cancellation is
+    cooperative: call this at natural checkpoints (top of the scrape-page
+    loop, before a slow non-looping stage) rather than trying to interrupt
+    mid-stage. See RunRegistry.request_cancel()'s docstring for the tradeoff."""
+    if run_registry.is_cancel_requested(run_id):
+        raise _RunCancelled()
+
+
 def run_pipeline_thread(run_registry: RunRegistry, run_id: str, inquiry: str, target: int = 25, max_pages: int = 10,
                         verifier_provider: str = "gmail_bounce", icp: dict = None,
                         profile: str = "balanced",
@@ -71,6 +86,8 @@ def run_pipeline_thread(run_registry: RunRegistry, run_id: str, inquiry: str, ta
         search_plan = pl.build_search_plan(icp)
         q.put({"type": "search_plan", "data": search_plan})
 
+        _raise_if_cancelled(run_registry, run_id)
+
         # ── Stage 3: Company Discovery ───────────────────────────────────────
         # Company-first search: find candidate companies matching the ICP's
         # firmographics before searching for any people at all. See
@@ -108,6 +125,8 @@ def run_pipeline_thread(run_registry: RunRegistry, run_id: str, inquiry: str, ta
 
         verified_high_conf_count = 0
         while verified_high_conf_count < target and page <= max_pages:
+            _raise_if_cancelled(run_registry, run_id)
+
             # Scrape — via the Source Orchestrator; see pl.run_lead_sources().
             # NOT scoped to validated_companies: Apify's leads-finder actor
             # has no company-name input to search "at" in the first place
@@ -196,6 +215,8 @@ def run_pipeline_thread(run_registry: RunRegistry, run_id: str, inquiry: str, ta
         sample = pl.select_sample(verified_pool, icp, min_count=target, max_count=None, min_composite_score=min_composite_score)
         score_floor_underfilled = min_composite_score is not None and len(sample) < target
         push_stats(sample=len(sample))
+
+        _raise_if_cancelled(run_registry, run_id)
 
         # ── Stage 11: Claim Verification ─────────────────────────────────────
         push_stage(11, "Verifying Claims")
@@ -287,6 +308,11 @@ def run_pipeline_thread(run_registry: RunRegistry, run_id: str, inquiry: str, ta
         run["status"] = "complete"
         q.put({"type": "complete", "data": run["results"]})
 
+    except _RunCancelled:
+        run["status"] = "cancelled"
+        q.put({"type": "cancelled"})
+        logger.info("Pipeline run %s cancelled by user", run_id)
+
     except Exception as exc:
         run["status"] = "error"
         run["error"]  = str(exc)
@@ -361,6 +387,8 @@ def run_pipeline_imported_thread(run_registry: RunRegistry, run_id: str, inquiry
         if not clean_batch:
             raise ValueError("All imported leads were duplicates, empty, or failed quality gates.")
 
+        _raise_if_cancelled(run_registry, run_id)
+
         # ── Stage 7: LinkedIn Cross-Verify ────────────────────────────────────
         push_stage(7, "LinkedIn Cross-Verify")
         clean_batch = pl.linkedin_cross_verify_leads(
@@ -395,6 +423,8 @@ def run_pipeline_imported_thread(run_registry: RunRegistry, run_id: str, inquiry
         sample = pl.select_sample(verified_pool, icp, min_count=target, max_count=target, min_composite_score=min_composite_score)
         score_floor_underfilled = min_composite_score is not None and len(sample) < target
         push_stats(sample=len(sample))
+
+        _raise_if_cancelled(run_registry, run_id)
 
         # ── Stage 11: Claim Verification ─────────────────────────────────────
         push_stage(11, "Verifying Claims")
@@ -473,6 +503,11 @@ def run_pipeline_imported_thread(run_registry: RunRegistry, run_id: str, inquiry
         save_run_metadata(run, csv_path, icp)
         run["status"] = "complete"
         q.put({"type": "complete", "data": run["results"]})
+
+    except _RunCancelled:
+        run["status"] = "cancelled"
+        q.put({"type": "cancelled"})
+        logger.info("Pipeline run %s cancelled by user", run_id)
 
     except Exception as exc:
         run["status"] = "error"

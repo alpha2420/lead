@@ -113,10 +113,13 @@
     }
 
     function syncRefinementPanelOnly() {
+      const emptyState = document.getElementById('refinementEmptyState');
       if (!lastParsedICP) {
         document.getElementById('refinementSection').style.display = 'none';
+        if (emptyState) emptyState.style.display = 'block';
         return;
       }
+      if (emptyState) emptyState.style.display = 'none';
       document.getElementById('refinementSection').style.display = 'flex';
 
       // Lazily initialize every BI module this panel touches — guards

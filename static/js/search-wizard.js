@@ -52,12 +52,41 @@ function setWizardMode(mode) {
 }
 
 // ── Section lock/open primitives — mirrors toggleStrategyModule()'s
-// existing open/closed mechanic (icp.js), plus a "locked" state a plain
-// accordion doesn't need. ──────────────────────────────────────────────
+// existing open/closed mechanic (icp.js). "locked" is visual-only (dims a
+// section that hasn't been touched yet, in .wizard-section.locked's CSS) —
+// it never blocks a click. Any user can freely open Refine ICP or Configure
+// & Run right away without describing a target first: Configure & Run's
+// fields (target lead count, execution profile, Run Pipeline) don't need an
+// ICP to be useful, and Refine ICP shows its own explanatory empty state
+// when there isn't one yet (see syncRefinementPanelOnly(), icp.js). ──────
+// Configure & Run's body reuses the sidebar's #settingsContent panel
+// (collapsed by default — max-height:0 until toggleSettings() adds .show,
+// see static/css/layout.css). The wizard accordion has no toggle control of
+// its own for it, so without this it stays visibly empty (Target Leads,
+// Execution Profile, even the Run Pipeline button all live inside it) no
+// matter which of the wizard's several open-this-section paths got used.
+function _ensureConfigureContentExpanded(id) {
+  if (id !== 'wizardSectionConfigure') return;
+  const settingsContent = document.getElementById('settingsContent');
+  if (settingsContent) settingsContent.classList.add('show');
+}
+
 function toggleWizardSection(id) {
   const el = document.getElementById(id);
-  if (!el || el.classList.contains('locked')) return;
+  if (!el) return;
+
+  // Sections toggle independently (see module docstring — not a rigid
+  // one-panel-at-a-time wizard), but collapsing the one currently-open
+  // section down to zero leaves every row shut with no visual cue for
+  // which header to click next. Refuse that specific transition — the
+  // user can still switch which section is open by opening a different
+  // one, just not close the last one down to nothing.
+  const isOpen = document.querySelectorAll('.wizard-section.open').length;
+  if (el.classList.contains('open') && isOpen <= 1) return;
+
+  el.classList.remove('locked');   // first click clears the dimmed "not yet touched" look
   el.classList.toggle('open');
+  if (el.classList.contains('open')) _ensureConfigureContentExpanded(id);
   renderWizardProgress();
 }
 
@@ -69,6 +98,7 @@ function unlockWizardSection(id) {
 function openWizardSection(id) {
   const el = document.getElementById(id);
   if (el) { el.classList.remove('locked'); el.classList.add('open'); }
+  _ensureConfigureContentExpanded(id);
 }
 
 function collapseWizardSection(id) {
@@ -159,6 +189,8 @@ function enterProgressView() {
   if (progress) progress.style.display = 'block';
   const banner = document.getElementById('progressBanner');
   if (banner) banner.innerHTML = '';
+  const stopBtn = document.getElementById('btnStopRun');
+  if (stopBtn) { stopBtn.style.display = ''; stopBtn.disabled = false; stopBtn.textContent = 'Stop Pipeline'; }
 }
 
 function exitProgressView() {
@@ -188,6 +220,8 @@ function onRunComplete(stats) {
       </div>
     `;
   }
+  const stopBtn = document.getElementById('btnStopRun');
+  if (stopBtn) stopBtn.style.display = 'none';
 }
 
 // Called from pipeline-run.js's SSE 'error' handler. Stays in the progress
@@ -205,12 +239,34 @@ function onRunError(message) {
       </div>
     `;
   }
+  const stopBtn = document.getElementById('btnStopRun');
+  if (stopBtn) stopBtn.style.display = 'none';
+}
+
+// Called from pipeline-run.js's SSE 'cancelled' handler (user clicked Stop
+// Pipeline). Same backtrack options as onRunError, since the sample so far
+// was discarded server-side (app/pipeline_runner.py never reaches export_csv
+// on a cancelled run) — there's nothing to view, only somewhere to go back to.
+function onRunCancelled() {
+  const banner = document.getElementById('progressBanner');
+  if (banner) {
+    banner.innerHTML = `
+      <div class="alert warning show" style="margin-bottom:10px;">■ Pipeline stopped.</div>
+      <div class="btn-pair">
+        <button class="btn-dashed" onclick="exitProgressView(); openWizardSection('wizardSectionConfigure'); renderWizardProgress();">&larr; Back to Configure</button>
+        <button class="btn-dashed" onclick="resetWizard();">New Search</button>
+      </div>
+    `;
+  }
+  const stopBtn = document.getElementById('btnStopRun');
+  if (stopBtn) stopBtn.style.display = 'none';
 }
 
 // Clears wizard + chat state and returns to Section 1 — called from the
 // completion banner's "New Search" button.
 function resetWizard() {
   lastParsedICP = null;
+  if (typeof syncRefinementPanelOnly === 'function') syncRefinementPanelOnly();   // clear stale ICP content, restore the empty state
   if (typeof chatHistory !== 'undefined') chatHistory.length = 0;
 
   const chatLog = document.getElementById('chatLog');

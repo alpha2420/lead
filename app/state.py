@@ -27,6 +27,7 @@ class RunRegistry:
             "results": None,
             "error": None,
             "created_at": time.time(),
+            "cancel_requested": False,
         }
         with self._lock:
             self._runs[run_id] = run
@@ -35,6 +36,24 @@ class RunRegistry:
     def get(self, run_id: str) -> dict | None:
         with self._lock:
             return self._runs.get(run_id)
+
+    def request_cancel(self, run_id: str) -> bool:
+        """Marks a run for cooperative cancellation. Python threads can't be
+        killed outright, so this is advisory: the pipeline thread checks
+        is_cancel_requested() at its own checkpoints (between scrape pages,
+        before slow stages) and exits cleanly there — it doesn't take effect
+        mid-instruction. Returns False if the run doesn't exist."""
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is None:
+                return False
+            run["cancel_requested"] = True
+            return True
+
+    def is_cancel_requested(self, run_id: str) -> bool:
+        with self._lock:
+            run = self._runs.get(run_id)
+            return bool(run and run.get("cancel_requested"))
 
     def list(self) -> list[dict]:
         with self._lock:

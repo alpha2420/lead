@@ -80,6 +80,15 @@
           if (typeof onRunError === 'function') onRunError(msg.message);
           es.close();
         }
+
+        if (msg.type === 'cancelled') {
+          stopPipelineTimer();
+          setRunStatus('idle', 'Cancelled');
+          resetButton();
+          appendLog('INFO', '■ Pipeline cancelled by user.');
+          if (typeof onRunCancelled === 'function') onRunCancelled();
+          es.close();
+        }
       };
 
       es.onerror = () => {
@@ -90,11 +99,47 @@
       };
     }
 
+    // Reconnects to an already-running pipeline's live progress — used by
+    // Home's "View Live" (renderHomePipelineStatus(), home-dashboard.js),
+    // which only has a run_id from GET /api/runs, not a fresh SSE
+    // connection. If this same page/tab already opened the connection
+    // (currentRunId matches — set by connectSSE() above), reuse it instead
+    // of opening a second EventSource: /api/stream/<run_id> hands each
+    // message to whichever consumer calls next on the run's plain
+    // queue.Queue first, so two live connections to the same run would
+    // silently split its messages between them rather than both seeing
+    // everything.
+    function viewLiveRun(runId) {
+      openSearchDrawer();
+      if (typeof enterProgressView === 'function') enterProgressView();
+      if (currentRunId === runId) return;
+      connectSSE(runId);
+    }
+
+    // POSTs a cancel request for the run currently shown in the progress
+    // view. Cooperative, not instant — see app/state.py's
+    // RunRegistry.request_cancel() docstring: the backend thread only
+    // checks this at its own checkpoints, so the 'cancelled' SSE message
+    // above may arrive anywhere from immediately to ~90s later (e.g. mid
+    // gmail_bounce wait) depending which stage is running.
+    async function stopRun() {
+      if (!currentRunId) return;
+      const btn = document.getElementById('btnStopRun');
+      if (btn) { btn.disabled = true; btn.textContent = 'Stopping…'; }
+      try {
+        await fetch(`/api/run/${currentRunId}/cancel`, { method: 'POST' });
+      } catch (err) {
+        showAlert('error', `Failed to request cancellation: ${err.message}`);
+        if (btn) { btn.disabled = false; btn.textContent = 'Stop Pipeline'; }
+      }
+    }
+
     // ── Pipeline Settings Toggle ────────────────────────────────────────────────
     function toggleSettings() {
       const content = document.getElementById('settingsContent');
       const icon = document.getElementById('settingsToggleIcon');
       content.classList.toggle('show');
+      if (!icon) return;   // dashboard redesign dropped this chevron; nothing left to rotate
       if (content.classList.contains('show')) {
         icon.style.transform = 'rotate(0deg)';
       } else {

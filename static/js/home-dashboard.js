@@ -59,7 +59,7 @@ function renderHomePipelineStatus(liveRuns) {
           <span class="status-dot running"></span>
           <span style="font-size:0.8rem; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">Pipeline running — "${escapeHtml(active.inquiry || '')}"</span>
         </div>
-        <button class="stat-card-link" onclick="openSearchDrawer()">View Live <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="9 18 15 12 9 6"/></svg></button>
+        <button class="stat-card-link" onclick="viewLiveRun('${escapeHtml(active.id)}')">View Live <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="9 18 15 12 9 6"/></svg></button>
       </div>
     `;
   } else {

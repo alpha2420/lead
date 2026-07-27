@@ -97,6 +97,12 @@
       }
 
       renderStages();
+      // No ICP exists yet at fresh load — show Refine ICP's friendly empty
+      // state (see templates/index.html's #refinementEmptyState) instead of
+      // leaving it in its raw pre-JS markup state if a user opens Section 2
+      // before ever describing a target (search-wizard.js's toggleWizardSection()
+      // no longer blocks that).
+      if (typeof syncRefinementPanelOnly === 'function') syncRefinementPanelOnly();
       initCharts();
       updateChartThemeColors(!isDark);
       checkHealth();

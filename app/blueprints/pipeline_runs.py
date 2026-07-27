@@ -200,6 +200,18 @@ def start_imported_run():
     return jsonify({"run_id": run_id})
 
 
+@bp.route("/run/<run_id>/cancel", methods=["POST"])
+def cancel_run(run_id: str):
+    registry = _registry()
+    run = registry.get(run_id)
+    if run is None:
+        return jsonify({"error": "run not found"}), 404
+    if run["status"] not in ("pending", "running"):
+        return jsonify({"error": f"run is already {run['status']}"}), 400
+    registry.request_cancel(run_id)
+    return jsonify({"status": "cancel_requested"})
+
+
 @bp.route("/stream/<run_id>")
 def stream(run_id: str):
     registry = _registry()

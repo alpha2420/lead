@@ -229,6 +229,15 @@
         const data = await res.json();
         selectedLeadKeys.clear();
 
+        // If the search drawer was left showing a previous run's completed
+        // progress view (user closed it without hitting "New Search"), that
+        // stale "Complete — N leads exported" banner + 15/15 progress bar
+        // would otherwise still be showing underneath the "Loaded historic
+        // dataset" alert below — two unrelated results stacked in the same
+        // drawer. Loading a historic dataset is a fresh action, so make
+        // sure it always lands on a clean, non-progress-view state.
+        if (typeof exitProgressView === 'function') exitProgressView();
+
         // 1. Populate inquiry text
         document.getElementById('inquiry').value = data.inquiry || '';
         

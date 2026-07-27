@@ -362,6 +362,9 @@
             <span class="wizard-section-chevron">▾</span>
           </div>
           <div class="wizard-section-body">
+          <div id="refinementEmptyState" style="display:none; text-align:center; padding:28px 16px; color:var(--text-dim); font-size:0.8rem; line-height:1.6;">
+            No Ideal Customer Profile yet — describe your target in <strong>Section 1</strong> above, or skip straight to <strong>Configure &amp; Run</strong> if you already know your lead count and just want to go.
+          </div>
           <div id="refinementSection">
             <div class="section-label">
               <span class="section-icon-badge"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg></span>
@@ -639,6 +642,9 @@
              sitting below them. -->
         <div id="pipelineProgressView" style="display:none;">
           <div id="progressBanner"></div>
+          <button class="btn-dashed" id="btnStopRun" onclick="stopRun()" style="margin-bottom:12px; border-color:var(--red); color:var(--red);">
+            Stop Pipeline
+          </button>
           <div class="sidebar-section accent-green" id="pipelineProgressSection">
           <div class="section-label" onclick="togglePipelineProgress()" style="cursor:pointer; user-select:none;">
             <span class="section-icon-badge"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></span>
